@@ -1,0 +1,32 @@
+// Package optional provides presence-aware JSON fields for PATCH semantics.
+package optional
+
+import (
+	"bytes"
+	"encoding/json"
+)
+
+type Field[T any] struct {
+	set   bool
+	null  bool
+	value T
+}
+
+func (f *Field[T]) UnmarshalJSON(data []byte) error {
+	f.set = true
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		f.null = true
+		var zero T
+		f.value = zero
+		return nil
+	}
+	f.null = false
+	return json.Unmarshal(data, &f.value)
+}
+
+func (f Field[T]) IsSet() bool  { return f.set }
+func (f Field[T]) IsNull() bool { return f.set && f.null }
+
+func (f Field[T]) Value() (T, bool) {
+	return f.value, f.set && !f.null
+}

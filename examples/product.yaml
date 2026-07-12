@@ -1,0 +1,37 @@
+schema_version: 1
+name: Product
+table: products
+route: /products
+
+fields:
+  - name: name
+    type: string
+    required: true
+    max_length: 120
+    searchable: true
+    unique: true
+
+  - name: status
+    type: string
+    required: true
+    enum: [enabled, disabled]
+    filterable: true
+
+  - name: owner_id
+    type: int64
+    filterable: true
+    sortable: true
+
+  - name: price
+    type: decimal
+    min: 0
+
+  - name: metadata
+    type: json
+    nullable: true
+
+  - name: order
+    type: string
+    searchable: true
+    filterable: true
+    sortable: true

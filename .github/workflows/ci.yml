@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.5
+          cache: true
+      - name: Download modules
+        run: go mod download
+      - name: Formatting
+        if: runner.os == 'Linux'
+        run: test -z "$(gofmt -l .)"
+      - name: Unit and generated-project tests
+        run: go test -race ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Vulnerability scan
+        if: runner.os == 'Linux'
+        run: go tool govulncheck ./...
+
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: kit_test
+          POSTGRES_USER: kit
+          POSTGRES_PASSWORD: kit
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kit -d kit_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://kit:kit@localhost:5432/kit_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.5
+          cache: true
+      - name: PostgreSQL migration and contract test
+        run: ./scripts/postgres-e2e.sh

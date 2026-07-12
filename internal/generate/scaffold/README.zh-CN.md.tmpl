@@ -1,0 +1,51 @@
+# {{.Module}}
+
+本项目由 [go-backend-kit](https://github.com/alphayan/go-backend-kit) {{.Version}} 生成。
+
+[English](README.md)
+
+## 添加资源
+
+```bash
+go tool gobackend add path/to/resource.yaml
+go tool gobackend check
+```
+
+`resources/` 中的 YAML 是唯一事实来源。生成文件以 `_gen.go` 或 `_gen_test.go` 结尾；`custom.go` 和其他手写文件永不覆盖。
+
+`go tool gobackend generate` 会调用固定版本的官方 GORM CLI，重新生成仓储筛选和排序实际使用的字段辅助。
+
+## 数据库与迁移
+
+```bash
+docker compose up -d postgres
+make migration name=create_products
+DATABASE_URL='postgres://app:app@localhost:5432/app?sslmode=disable' make migrate-apply
+```
+
+迁移命令使用固定的开源 Atlas v1.2.3 Community Docker 镜像：先在宿主机运行生成的 GORM Provider，再让 Atlas 使用临时 PostgreSQL 开发库计算差异。应用前请审查 `migrations/` 中的 SQL。生产启动不会调用 `AutoMigrate`。
+
+## 启动
+
+```bash
+cp .env.example .env
+set -a; . ./.env; set +a
+make run
+```
+
+可访问 `/api/v1`、`/health/live`、`/health/ready`、`/openapi.json` 和 `/docs`。
+
+## 验证
+
+```bash
+go tool gobackend check
+go test -race ./...
+go vet ./...
+go tool govulncheck ./...
+```
+
+SQLite 仅用于本地快速契约测试；CI 会先把已审查迁移应用到 PostgreSQL，再运行相同契约。
+
+## License
+
+MIT

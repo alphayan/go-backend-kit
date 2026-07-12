@@ -1,0 +1,62 @@
+package validation
+
+import (
+	"fmt"
+
+	"github.com/shopspring/decimal"
+)
+
+type Details map[string]string
+
+func Presence(details Details, name string, set, null, required, nullable bool) {
+	if required && !set {
+		details[name] = "is required"
+		return
+	}
+	if null && !nullable {
+		details[name] = "cannot be null"
+	}
+}
+
+func MaxLength(details Details, name, value string, limit int) {
+	if len([]rune(value)) > limit {
+		details[name] = fmt.Sprintf("must be at most %d characters", limit)
+	}
+}
+
+func OneOf(details Details, name, value string, allowed []string) {
+	for _, candidate := range allowed {
+		if value == candidate {
+			return
+		}
+	}
+	details[name] = "must be one of the allowed values"
+}
+
+func Min(details Details, name string, value any, minimum float64) {
+	if number, ok := asFloat(value); ok && number < minimum {
+		details[name] = fmt.Sprintf("must be at least %v", minimum)
+	}
+}
+
+func Max(details Details, name string, value any, maximum float64) {
+	if number, ok := asFloat(value); ok && number > maximum {
+		details[name] = fmt.Sprintf("must be at most %v", maximum)
+	}
+}
+
+func asFloat(value any) (float64, bool) {
+	switch value := value.(type) {
+	case int32:
+		return float64(value), true
+	case int64:
+		return float64(value), true
+	case float64:
+		return value, true
+	case decimal.Decimal:
+		number, _ := value.Float64()
+		return number, true
+	default:
+		return 0, false
+	}
+}

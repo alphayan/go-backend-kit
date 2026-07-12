@@ -1,0 +1,47 @@
+// Package apperror defines stable public API errors without leaking internals.
+package apperror
+
+import (
+	"errors"
+	"net/http"
+
+	"gorm.io/gorm"
+)
+
+type Error struct {
+	Status  int
+	Code    string
+	Message string
+	Details any
+}
+
+func (e *Error) Error() string { return e.Code }
+
+func BadRequest(code, message string) *Error {
+	return &Error{Status: http.StatusBadRequest, Code: code, Message: message}
+}
+
+func Validation(details any) *Error {
+	return &Error{Status: http.StatusUnprocessableEntity, Code: "validation_failed", Message: "request validation failed", Details: details}
+}
+
+func FromDatabase(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return &Error{Status: http.StatusNotFound, Code: "not_found", Message: "resource not found"}
+	}
+	if errors.Is(err, gorm.ErrDuplicatedKey) {
+		return &Error{Status: http.StatusConflict, Code: "conflict", Message: "resource conflicts with an existing record"}
+	}
+	return &Error{Status: http.StatusInternalServerError, Code: "internal_error", Message: "internal server error"}
+}
+
+func Public(err error) *Error {
+	var public *Error
+	if errors.As(err, &public) {
+		return public
+	}
+	return &Error{Status: http.StatusInternalServerError, Code: "internal_error", Message: "internal server error"}
+}

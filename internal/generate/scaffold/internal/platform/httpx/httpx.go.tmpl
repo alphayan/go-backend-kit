@@ -1,0 +1,137 @@
+package httpx
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"{{.Module}}/internal/platform/apperror"
+	"github.com/google/uuid"
+	"github.com/labstack/echo/v5"
+	"github.com/shopspring/decimal"
+	"gorm.io/datatypes"
+)
+
+type Data[T any] struct {
+	Data T `json:"data"`
+}
+
+type Page[T any] struct {
+	Items      []T   `json:"items"`
+	Page       int   `json:"page"`
+	PageSize   int   `json:"page_size"`
+	Total      int64 `json:"total"`
+	TotalPages int   `json:"total_pages"`
+}
+
+type errorBody struct {
+	Error errorData `json:"error"`
+}
+
+type errorData struct {
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	Details   any    `json:"details"`
+	RequestID string `json:"request_id"`
+}
+
+func WriteData[T any](c *echo.Context, status int, data T) error {
+	return c.JSON(status, Data[T]{Data: data})
+}
+
+func WriteError(c *echo.Context, err error) error {
+	public := apperror.Public(err)
+	if status := echo.StatusCode(err); status != 0 {
+		message := http.StatusText(status)
+		code := strings.ToLower(strings.ReplaceAll(message, " ", "_"))
+		if code == "" {
+			code = "http_error"
+			message = "request failed"
+		}
+		public = &apperror.Error{Status: status, Code: code, Message: message}
+	}
+	requestID := c.Response().Header().Get("X-Request-ID")
+	if requestID == "" {
+		requestID = c.Request().Header.Get("X-Request-ID")
+	}
+	return c.JSON(public.Status, errorBody{Error: errorData{Code: public.Code, Message: public.Message, Details: public.Details, RequestID: requestID}})
+}
+
+func NewPage[T any](items []T, page, pageSize int, total int64) Page[T] {
+	totalPages := 0
+	if total > 0 {
+		totalPages = int((total + int64(pageSize) - 1) / int64(pageSize))
+	}
+	if items == nil {
+		items = []T{}
+	}
+	return Page[T]{Items: items, Page: page, PageSize: pageSize, Total: total, TotalPages: totalPages}
+}
+
+func ParsePage(rawPage, rawSize string) (int, int, error) {
+	page, size := 1, 20
+	var err error
+	if rawPage != "" {
+		page, err = strconv.Atoi(rawPage)
+		if err != nil || page < 1 {
+			return 0, 0, apperror.BadRequest("invalid_page", "page must be a positive integer")
+		}
+	}
+	if rawSize != "" {
+		size, err = strconv.Atoi(rawSize)
+		if err != nil || size < 1 || size > 100 {
+			return 0, 0, apperror.BadRequest("invalid_page_size", "page_size must be between 1 and 100")
+		}
+	}
+	maxInt := int(^uint(0) >> 1)
+	if page-1 > maxInt/size {
+		return 0, 0, apperror.BadRequest("invalid_page", "page is too large")
+	}
+	return page, size, nil
+}
+
+func DecodeJSON(request *http.Request, target any) error {
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return errors.New("request body must contain one JSON value")
+	}
+	return nil
+}
+
+func ParseScalar(raw, fieldType string) (any, error) {
+	switch fieldType {
+	case "string", "text":
+		return raw, nil
+	case "bool":
+		return strconv.ParseBool(raw)
+	case "int32":
+		value, err := strconv.ParseInt(raw, 10, 32)
+		return int32(value), err
+	case "int64":
+		return strconv.ParseInt(raw, 10, 64)
+	case "float64":
+		return strconv.ParseFloat(raw, 64)
+	case "decimal":
+		return decimal.NewFromString(raw)
+	case "time":
+		return time.Parse(time.RFC3339, raw)
+	case "uuid":
+		return uuid.Parse(raw)
+	case "json":
+		if !json.Valid([]byte(raw)) {
+			return nil, errors.New("invalid JSON")
+		}
+		return datatypes.JSON([]byte(raw)), nil
+	default:
+		return nil, errors.New("unsupported filter type")
+	}
+}

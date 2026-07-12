@@ -1,0 +1,63 @@
+# {{.Module}}
+
+Generated with [go-backend-kit](https://github.com/alphayan/go-backend-kit) {{.Version}}.
+
+[中文说明](README.zh-CN.md)
+
+## Add a resource
+
+```bash
+go tool gobackend add path/to/resource.yaml
+go tool gobackend check
+```
+
+The YAML files in `resources/` are the source of truth. Generated files end in `_gen.go` or `_gen_test.go`; `custom.go` and other handwritten files are never overwritten.
+
+`go tool gobackend generate` invokes the pinned official GORM CLI to regenerate field helpers used by repository filters and sorting.
+
+## Database and migrations
+
+```bash
+docker compose up -d postgres
+make migration name=create_products
+DATABASE_URL='postgres://app:app@localhost:5432/app?sslmode=disable' make migrate-apply
+```
+
+The migration command runs the pinned open-source Atlas v1.2.3 Community Docker image. It first executes the generated GORM Provider program on the host, then asks Atlas to diff the desired schema against a temporary PostgreSQL development database. Review the SQL in `migrations/` before applying it.
+
+Production startup never calls `AutoMigrate`.
+
+## Run
+
+```bash
+cp .env.example .env
+set -a; . ./.env; set +a
+make run
+```
+
+Endpoints:
+
+- API: `http://localhost:8080/api/v1`
+- Live health: `http://localhost:8080/health/live`
+- Ready health: `http://localhost:8080/health/ready`
+- OpenAPI: `http://localhost:8080/openapi.json`
+- Swagger UI: `http://localhost:8080/docs`
+
+## Verify
+
+```bash
+go tool gobackend check
+go test -race ./...
+go vet ./...
+go tool govulncheck ./...
+```
+
+SQLite is used only for fast local contract tests. CI applies reviewed migrations to PostgreSQL and runs the same generated contracts against it.
+
+## Runtime defaults
+
+The server uses request IDs, JSON structured logging, panic recovery, a 1 MiB body limit, a 15-second request timeout, security headers, configurable CORS, standard HTTP server timeouts, and a 10-second graceful shutdown.
+
+## License
+
+MIT

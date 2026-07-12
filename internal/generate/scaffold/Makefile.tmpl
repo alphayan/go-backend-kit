@@ -1,0 +1,29 @@
+.PHONY: generate check test vet vuln migration migrate-lint migrate-apply run
+
+generate:
+	go tool gobackend generate
+
+check:
+	go tool gobackend check
+
+test:
+	go test -race ./...
+
+vet:
+	go vet ./...
+
+vuln:
+	go tool govulncheck ./...
+
+migration:
+	@test -n "$(name)" || (echo "usage: make migration name=create_tasks" && exit 1)
+	./scripts/atlas.sh migrate diff "$(name)" --env local
+
+migrate-lint:
+	./scripts/atlas.sh migrate lint --env local --latest 1
+
+migrate-apply:
+	./scripts/atlas.sh migrate apply --env ci
+
+run:
+	go run ./cmd/api

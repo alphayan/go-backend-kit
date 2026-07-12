@@ -1,0 +1,67 @@
+package app
+
+import (
+	"log/slog"
+	"net/http"
+	"time"
+
+	"{{.Module}}/internal/generated"
+	"{{.Module}}/internal/platform/config"
+	"{{.Module}}/internal/platform/httpx"
+	"{{.Module}}/openapi"
+	"github.com/labstack/echo/v5"
+	"github.com/labstack/echo/v5/middleware"
+	"github.com/swaggest/swgui/v5emb"
+	"gorm.io/gorm"
+)
+
+func New(cfg config.Config, db *gorm.DB, logger *slog.Logger) *echo.Echo {
+	e := echo.NewWithConfig(echo.Config{Logger: logger})
+	e.HTTPErrorHandler = func(c *echo.Context, err error) { _ = httpx.WriteError(c, err) }
+	e.Use(middleware.RequestID())
+	e.Use(middleware.Recover())
+	e.Use(middleware.BodyLimit(1 << 20))
+	e.Use(middleware.ContextTimeout(cfg.RequestTimeout))
+	e.Use(middleware.Secure())
+	if len(cfg.CORSOrigins) > 0 {
+		e.Use(middleware.CORS(cfg.CORSOrigins...))
+	}
+	e.Use(requestLogger(logger))
+
+	e.GET("/health/live", func(c *echo.Context) error {
+		return httpx.WriteData(c, http.StatusOK, map[string]string{"status": "ok"})
+	})
+	e.GET("/health/ready", func(c *echo.Context) error {
+		sqlDB, err := db.DB()
+		if err != nil || sqlDB.PingContext(c.Request().Context()) != nil {
+			return httpx.WriteError(c, echo.ErrServiceUnavailable)
+		}
+		return httpx.WriteData(c, http.StatusOK, map[string]string{"status": "ready"})
+	})
+	e.GET("/openapi.json", func(c *echo.Context) error {
+		return c.JSONBlob(http.StatusOK, openapi.Spec)
+	})
+	docs := echo.WrapHandler(v5emb.New("Generated Backend API", "/openapi.json", "/docs"))
+	e.GET("/docs", docs)
+	e.GET("/docs/*", docs)
+	generated.Register(e.Group("/api/v1"), db)
+	return e
+}
+
+func requestLogger(logger *slog.Logger) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c *echo.Context) error {
+			start := time.Now()
+			err := next(c)
+			_, status := echo.ResolveResponseStatus(c.Response(), err)
+			logger.LogAttrs(c.Request().Context(), slog.LevelInfo, "http_request",
+				slog.String("method", c.Request().Method),
+				slog.String("path", c.Request().URL.Path),
+				slog.Int("status", status),
+				slog.String("request_id", c.Response().Header().Get("X-Request-ID")),
+				slog.Int64("duration_ms", time.Since(start).Milliseconds()),
+			)
+			return err
+		}
+	}
+}

@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+mkdir -p .gobackend
+schema=.gobackend/schema.sql
+dev_container="gobackend-atlas-dev-$$"
+cleanup() {
+  docker rm -f "$dev_container" >/dev/null 2>&1 || true
+  rm -f "$schema"
+}
+trap cleanup EXIT HUP INT TERM
+go run ./tools/gormschema > "$schema"
+
+docker run -d --name "$dev_container" \
+  -e POSTGRES_PASSWORD=atlas \
+  -P postgres:17-alpine >/dev/null
+attempts=0
+until docker exec "$dev_container" pg_isready -U postgres >/dev/null 2>&1; do
+  attempts=$((attempts + 1))
+  if [ "$attempts" -ge 30 ]; then
+    echo "Atlas development database did not become ready" >&2
+    exit 1
+  fi
+  sleep 1
+done
+dev_port=$(docker port "$dev_container" 5432/tcp | head -n 1 | awk -F: '{print $NF}')
+container_dev_url="postgres://postgres:atlas@host.docker.internal:${dev_port}/postgres?sslmode=disable"
+
+container_database_url=${ATLAS_DATABASE_URL:-${DATABASE_URL:-}}
+container_database_url=$(printf '%s' "$container_database_url" | sed \
+  -e 's/@localhost:/@host.docker.internal:/g' \
+  -e 's/@127\.0\.0\.1:/@host.docker.internal:/g')
+
+docker run --rm \
+  --add-host host.docker.internal:host-gateway \
+  -e "DATABASE_URL=$container_database_url" \
+  -e "ATLAS_DEV_URL=$container_dev_url" \
+  -v "$root:/workspace" \
+  -w /workspace \
+  arigaio/atlas:1.2.3-community "$@"

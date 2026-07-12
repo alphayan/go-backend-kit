@@ -1,0 +1,41 @@
+package config
+
+import (
+	"errors"
+	"os"
+	"strings"
+	"time"
+)
+
+type Config struct {
+	Address        string
+	DatabaseURL    string
+	CORSOrigins   []string
+	RequestTimeout time.Duration
+}
+
+func Load() (Config, error) {
+	cfg := Config{
+		Address:        envOr("HTTP_ADDRESS", ":8080"),
+		DatabaseURL:    os.Getenv("DATABASE_URL"),
+		RequestTimeout: 15 * time.Second,
+	}
+	if raw := strings.TrimSpace(os.Getenv("CORS_ORIGINS")); raw != "" {
+		for _, origin := range strings.Split(raw, ",") {
+			if origin = strings.TrimSpace(origin); origin != "" {
+				cfg.CORSOrigins = append(cfg.CORSOrigins, origin)
+			}
+		}
+	}
+	if cfg.DatabaseURL == "" {
+		return Config{}, errors.New("DATABASE_URL is required")
+	}
+	return cfg, nil
+}
+
+func envOr(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
+}

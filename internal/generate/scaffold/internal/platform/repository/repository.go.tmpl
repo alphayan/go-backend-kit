@@ -1,0 +1,55 @@
+// Package repository provides common type-safe GORM CRUD operations.
+package repository
+
+import (
+	"context"
+
+	"gorm.io/cli/gorm/field"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+type Base[T any] struct{ db *gorm.DB }
+
+func New[T any](db *gorm.DB) *Base[T] { return &Base[T]{db: db} }
+
+func Translate(db *gorm.DB, err error) error {
+	if translator, ok := db.Dialector.(gorm.ErrorTranslator); ok {
+		return translator.Translate(err)
+	}
+	return err
+}
+
+func Equal(column field.ColumnInterface, value any) clause.Expression {
+	return clause.Eq{Column: column.Column(), Value: value}
+}
+
+func (r *Base[T]) Create(ctx context.Context, item *T) error {
+	return gorm.G[T](r.db).Create(ctx, item)
+}
+
+func (r *Base[T]) Get(ctx context.Context, id int64) (T, error) {
+	return gorm.G[T](r.db).Where("id = ?", id).First(ctx)
+}
+
+func (r *Base[T]) Update(ctx context.Context, id int64, values map[string]any) error {
+	result := r.db.WithContext(ctx).Model(new(T)).Where("id = ?", id).Updates(values)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
+func (r *Base[T]) Delete(ctx context.Context, id int64) error {
+	rows, err := gorm.G[T](r.db).Where("id = ?", id).Delete(ctx)
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
