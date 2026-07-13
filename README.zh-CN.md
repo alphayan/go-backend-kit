@@ -100,6 +100,8 @@ DELETE /api/v1/products/:id
 
 默认包含 request ID、JSON `slog`、panic recover、1 MiB body 限制、15 秒请求超时、安全头、可配置 CORS、标准 `http.Server` 超时和 10 秒优雅停机，并提供 `/health/live`、`/health/ready`、`/openapi.json`、`/docs`。
 
+PostgreSQL 连接池默认最多 25 个连接、25 个空闲连接，连接最长存活 30 分钟、最长空闲 5 分钟；可通过 `DB_MAX_OPEN_CONNS`、`DB_MAX_IDLE_CONNS`、`DB_CONN_MAX_LIFETIME` 和 `DB_CONN_MAX_IDLE_TIME` 覆盖。启动时会在 `DB_CONNECT_TIMEOUT`（默认 5 秒）内执行数据库探测，失败则拒绝启动；停机时显式关闭连接池。
+
 生产启动绝不调用 `AutoMigrate`。SQLite 的 `AutoMigrate` 只用于本地契约快测；CI 先把经过审查的 Atlas SQL 迁移应用到 PostgreSQL，再复跑相同契约。
 
 ## 测试

@@ -63,6 +63,8 @@ SQLite is used only for fast local contract tests. CI applies reviewed migration
 
 The server uses request IDs, JSON structured logging, panic recovery, a 1 MiB body limit, a 15-second request timeout, security headers, configurable CORS, standard HTTP server timeouts, and a 10-second graceful shutdown.
 
+The PostgreSQL pool defaults to 25 open connections, 25 idle connections, a 30-minute connection lifetime, and a 5-minute idle lifetime. Configure it with `DB_MAX_OPEN_CONNS`, `DB_MAX_IDLE_CONNS`, `DB_CONN_MAX_LIFETIME`, and `DB_CONN_MAX_IDLE_TIME`. Startup performs a fail-closed database probe bounded by `DB_CONNECT_TIMEOUT`, which defaults to 5 seconds, and shutdown explicitly closes the pool.
+
 ## License
 
 MIT

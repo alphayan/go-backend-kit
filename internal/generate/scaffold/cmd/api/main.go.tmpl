@@ -15,20 +15,36 @@ import (
 	"{{.Module}}/internal/platform/database"
 )
 
-func main() {
+func main() { os.Exit(run()) }
+
+func run() (exitCode int) {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 	cfg, err := config.Load()
 	if err != nil {
 		logger.Error("invalid configuration", "error", err)
-		os.Exit(1)
+		return 1
 	}
-	db, err := database.Open(cfg.DatabaseURL)
+	startupContext, cancelStartup := context.WithTimeout(context.Background(), cfg.DatabaseConnectTimeout)
+	connection, err := database.Open(startupContext, cfg.DatabaseURL, database.PoolOptions{
+		MaxOpenConnections:    cfg.DatabaseMaxOpenConnections,
+		MaxIdleConnections:    cfg.DatabaseMaxIdleConnections,
+		ConnectionMaxLifetime: cfg.DatabaseConnectionMaxLifetime,
+		ConnectionMaxIdleTime: cfg.DatabaseConnectionMaxIdleTime,
+	})
+	cancelStartup()
 	if err != nil {
 		logger.Error("database connection failed", "error", err)
-		os.Exit(1)
+		return 1
 	}
-	handler := app.New(cfg, db, logger)
+	defer func() {
+		if err := connection.Close(); err != nil {
+			logger.Error("database close failed", "error", err)
+			exitCode = 1
+		}
+	}()
+
+	handler := app.New(cfg, connection.ORM, logger)
 	server := &http.Server{
 		Addr:              cfg.Address,
 		Handler:           handler,
@@ -46,7 +62,7 @@ func main() {
 
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-	exitCode := 0
+	defer signal.Stop(signals)
 	select {
 	case sig := <-signals:
 		logger.Info("shutdown requested", "signal", sig.String())
@@ -63,7 +79,5 @@ func main() {
 		logger.Error("graceful shutdown failed", "error", err)
 		exitCode = 1
 	}
-	if exitCode != 0 {
-		os.Exit(exitCode)
-	}
+	return exitCode
 }

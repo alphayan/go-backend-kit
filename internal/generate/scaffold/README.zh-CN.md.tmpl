@@ -51,6 +51,10 @@ go tool govulncheck ./...
 
 SQLite 仅用于本地快速契约测试；CI 会先把已审查迁移应用到 PostgreSQL，再运行相同契约。
 
+## 运行时默认值
+
+PostgreSQL 连接池默认最多 25 个连接、25 个空闲连接，连接最长存活 30 分钟、最长空闲 5 分钟；可通过 `DB_MAX_OPEN_CONNS`、`DB_MAX_IDLE_CONNS`、`DB_CONN_MAX_LIFETIME` 和 `DB_CONN_MAX_IDLE_TIME` 配置。启动时会在 `DB_CONNECT_TIMEOUT`（默认 5 秒）内执行数据库探测，失败则拒绝启动；停机时显式关闭连接池。
+
 ## License
 
 MIT

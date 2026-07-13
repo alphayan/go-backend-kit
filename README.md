@@ -127,6 +127,8 @@ Only files with the generated marker are managed. `custom.go` and other handwrit
 
 The generated server includes request IDs, JSON `slog`, panic recovery, a 1 MiB body limit, a 15-second request timeout, security headers, configurable CORS, standard `http.Server` timeouts, and a 10-second graceful shutdown. It exposes `/health/live`, `/health/ready`, `/openapi.json`, and `/docs`.
 
+The PostgreSQL pool defaults to 25 open connections, 25 idle connections, a 30-minute connection lifetime, and a 5-minute idle lifetime. `DB_MAX_OPEN_CONNS`, `DB_MAX_IDLE_CONNS`, `DB_CONN_MAX_LIFETIME`, and `DB_CONN_MAX_IDLE_TIME` override these values. Startup performs a fail-closed database probe bounded by `DB_CONNECT_TIMEOUT`, which defaults to 5 seconds, and shutdown explicitly closes the pool.
+
 Production startup never calls `AutoMigrate`. SQLite `AutoMigrate` is used only inside generated contract tests. CI applies reviewed Atlas migrations to PostgreSQL before rerunning the same contracts.
 
 ## Development

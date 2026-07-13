@@ -1,6 +1,10 @@
 package database
 
 import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -8,10 +12,61 @@ import (
 	"gorm.io/gorm"
 )
 
-func Open(dsn string) (*gorm.DB, error) {
-	return gorm.Open(postgres.Open(dsn), &gorm.Config{
+type PoolOptions struct {
+	MaxOpenConnections    int
+	MaxIdleConnections    int
+	ConnectionMaxLifetime time.Duration
+	ConnectionMaxIdleTime time.Duration
+}
+
+type Connection struct {
+	ORM *gorm.DB
+	SQL *sql.DB
+}
+
+func Open(ctx context.Context, dsn string, options PoolOptions) (*Connection, error) {
+	orm, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
 		TranslateError: true,
 		NowFunc:        func() time.Time { return time.Now().UTC() },
 		Logger:         newSlogLogger(slog.Default()),
 	})
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	sqlDB, err := orm.DB()
+	if err != nil {
+		return nil, fmt.Errorf("access database pool: %w", err)
+	}
+	if err := configureAndPing(ctx, sqlDB, options); err != nil {
+		_ = sqlDB.Close()
+		return nil, err
+	}
+	return &Connection{ORM: orm, SQL: sqlDB}, nil
+}
+
+func configureAndPing(ctx context.Context, db *sql.DB, options PoolOptions) error {
+	if options.MaxOpenConnections <= 0 {
+		return errors.New("max open connections must be greater than zero")
+	}
+	if options.MaxIdleConnections < 0 || options.MaxIdleConnections > options.MaxOpenConnections {
+		return errors.New("max idle connections must be between zero and max open connections")
+	}
+	if options.ConnectionMaxLifetime < 0 || options.ConnectionMaxIdleTime < 0 {
+		return errors.New("connection lifetimes cannot be negative")
+	}
+	db.SetMaxOpenConns(options.MaxOpenConnections)
+	db.SetMaxIdleConns(options.MaxIdleConnections)
+	db.SetConnMaxLifetime(options.ConnectionMaxLifetime)
+	db.SetConnMaxIdleTime(options.ConnectionMaxIdleTime)
+	if err := db.PingContext(ctx); err != nil {
+		return fmt.Errorf("ping database: %w", err)
+	}
+	return nil
+}
+
+func (connection *Connection) Close() error {
+	if connection == nil || connection.SQL == nil {
+		return nil
+	}
+	return connection.SQL.Close()
 }
