@@ -234,6 +234,13 @@ func TestLoadRejectsIdleConnectionsAboveOpenLimit(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestLoadRequiresDatabaseURL(t *testing.T) {
+	_, err := load(lookup(nil))
+	if err == nil || !strings.Contains(err.Error(), "DATABASE_URL is required") {
+		t.Fatalf("error = %v", err)
+	}
+}
 ```
 
 Add `internal/platform/config/config_test.go` to the expected scaffold files in `TestNewAddGenerateAndCheck`.

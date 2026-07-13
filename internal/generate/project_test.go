@@ -80,6 +80,7 @@ func TestNewAddGenerateAndCheck(t *testing.T) {
 		".gitignore",
 		".github/workflows/ci.yml",
 		"cmd/api/main.go",
+		"internal/platform/config/config_test.go",
 		"migrations/.gitkeep",
 		"internal/resources/task/model_gen.go",
 		"internal/resources/task/dto_gen.go",

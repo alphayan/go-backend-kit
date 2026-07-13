@@ -3,24 +3,79 @@ package config
 import (
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
 
+type envLookup func(string) string
+
 type Config struct {
-	Address        string
-	DatabaseURL    string
-	CORSOrigins   []string
-	RequestTimeout time.Duration
+	Address                       string
+	DatabaseURL                   string
+	DatabaseMaxOpenConnections    int
+	DatabaseMaxIdleConnections    int
+	DatabaseConnectionMaxLifetime time.Duration
+	DatabaseConnectionMaxIdleTime time.Duration
+	DatabaseConnectTimeout        time.Duration
+	CORSOrigins                   []string
+	RequestTimeout                time.Duration
 }
 
-func Load() (Config, error) {
-	cfg := Config{
-		Address:        envOr("HTTP_ADDRESS", ":8080"),
-		DatabaseURL:    os.Getenv("DATABASE_URL"),
-		RequestTimeout: 15 * time.Second,
+func Load() (Config, error) { return load(os.Getenv) }
+
+func load(getenv envLookup) (Config, error) {
+	maxOpen, err := intEnv(getenv, "DB_MAX_OPEN_CONNS", 25)
+	if err != nil {
+		return Config{}, err
 	}
-	if raw := strings.TrimSpace(os.Getenv("CORS_ORIGINS")); raw != "" {
+	maxIdle, err := intEnv(getenv, "DB_MAX_IDLE_CONNS", 25)
+	if err != nil {
+		return Config{}, err
+	}
+	maxLifetime, err := durationEnv(getenv, "DB_CONN_MAX_LIFETIME", 30*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	maxIdleTime, err := durationEnv(getenv, "DB_CONN_MAX_IDLE_TIME", 5*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	connectTimeout, err := durationEnv(getenv, "DB_CONNECT_TIMEOUT", 5*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+
+	if maxOpen <= 0 {
+		return Config{}, errors.New("DB_MAX_OPEN_CONNS must be greater than zero")
+	}
+	if maxIdle < 0 {
+		return Config{}, errors.New("DB_MAX_IDLE_CONNS cannot be negative")
+	}
+	if maxIdle > maxOpen {
+		return Config{}, errors.New("DB_MAX_IDLE_CONNS cannot exceed DB_MAX_OPEN_CONNS")
+	}
+	if maxLifetime < 0 {
+		return Config{}, errors.New("DB_CONN_MAX_LIFETIME cannot be negative")
+	}
+	if maxIdleTime < 0 {
+		return Config{}, errors.New("DB_CONN_MAX_IDLE_TIME cannot be negative")
+	}
+	if connectTimeout <= 0 {
+		return Config{}, errors.New("DB_CONNECT_TIMEOUT must be greater than zero")
+	}
+
+	cfg := Config{
+		Address:                       envOr(getenv, "HTTP_ADDRESS", ":8080"),
+		DatabaseURL:                   getenv("DATABASE_URL"),
+		DatabaseMaxOpenConnections:    maxOpen,
+		DatabaseMaxIdleConnections:    maxIdle,
+		DatabaseConnectionMaxLifetime: maxLifetime,
+		DatabaseConnectionMaxIdleTime: maxIdleTime,
+		DatabaseConnectTimeout:        connectTimeout,
+		RequestTimeout:                15 * time.Second,
+	}
+	if raw := strings.TrimSpace(getenv("CORS_ORIGINS")); raw != "" {
 		for _, origin := range strings.Split(raw, ",") {
 			if origin = strings.TrimSpace(origin); origin != "" {
 				cfg.CORSOrigins = append(cfg.CORSOrigins, origin)
@@ -33,8 +88,32 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-func envOr(name, fallback string) string {
-	if value := os.Getenv(name); value != "" {
+func intEnv(getenv envLookup, name string, fallback int) (int, error) {
+	raw := strings.TrimSpace(getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, errors.New(name + " must be an integer")
+	}
+	return value, nil
+}
+
+func durationEnv(getenv envLookup, name string, fallback time.Duration) (time.Duration, error) {
+	raw := strings.TrimSpace(getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, errors.New(name + " must be a Go duration")
+	}
+	return value, nil
+}
+
+func envOr(getenv envLookup, name, fallback string) string {
+	if value := getenv(name); value != "" {
 		return value
 	}
 	return fallback

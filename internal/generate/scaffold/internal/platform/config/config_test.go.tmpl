@@ -1,0 +1,91 @@
+package config
+
+import (
+	"strings"
+	"testing"
+	"time"
+)
+
+func lookup(values map[string]string) envLookup {
+	return func(name string) string { return values[name] }
+}
+
+func TestLoadDatabaseDefaults(t *testing.T) {
+	cfg, err := load(lookup(map[string]string{"DATABASE_URL": "postgres://example"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DatabaseMaxOpenConnections != 25 || cfg.DatabaseMaxIdleConnections != 25 {
+		t.Fatalf("pool counts = %d/%d", cfg.DatabaseMaxOpenConnections, cfg.DatabaseMaxIdleConnections)
+	}
+	if cfg.DatabaseConnectionMaxLifetime != 30*time.Minute || cfg.DatabaseConnectionMaxIdleTime != 5*time.Minute {
+		t.Fatalf("pool durations = %s/%s", cfg.DatabaseConnectionMaxLifetime, cfg.DatabaseConnectionMaxIdleTime)
+	}
+	if cfg.DatabaseConnectTimeout != 5*time.Second {
+		t.Fatalf("connect timeout = %s", cfg.DatabaseConnectTimeout)
+	}
+}
+
+func TestLoadDatabaseOverrides(t *testing.T) {
+	cfg, err := load(lookup(map[string]string{
+		"DATABASE_URL":          "postgres://example",
+		"DB_MAX_OPEN_CONNS":     "12",
+		"DB_MAX_IDLE_CONNS":     "4",
+		"DB_CONN_MAX_LIFETIME":  "45m",
+		"DB_CONN_MAX_IDLE_TIME": "90s",
+		"DB_CONNECT_TIMEOUT":    "3s",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DatabaseMaxOpenConnections != 12 || cfg.DatabaseMaxIdleConnections != 4 ||
+		cfg.DatabaseConnectionMaxLifetime != 45*time.Minute ||
+		cfg.DatabaseConnectionMaxIdleTime != 90*time.Second ||
+		cfg.DatabaseConnectTimeout != 3*time.Second {
+		t.Fatalf("unexpected overrides: %+v", cfg)
+	}
+}
+
+func TestLoadRejectsInvalidDatabaseSettings(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+		want  string
+	}{
+		{"open syntax", "DB_MAX_OPEN_CONNS", "many", "DB_MAX_OPEN_CONNS must be an integer"},
+		{"open zero", "DB_MAX_OPEN_CONNS", "0", "DB_MAX_OPEN_CONNS must be greater than zero"},
+		{"idle negative", "DB_MAX_IDLE_CONNS", "-1", "DB_MAX_IDLE_CONNS cannot be negative"},
+		{"lifetime negative", "DB_CONN_MAX_LIFETIME", "-1s", "DB_CONN_MAX_LIFETIME cannot be negative"},
+		{"idle duration syntax", "DB_CONN_MAX_IDLE_TIME", "later", "DB_CONN_MAX_IDLE_TIME must be a Go duration"},
+		{"connect zero", "DB_CONNECT_TIMEOUT", "0", "DB_CONNECT_TIMEOUT must be greater than zero"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			values := map[string]string{"DATABASE_URL": "postgres://example"}
+			values[test.key] = test.value
+			_, err := load(lookup(values))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsIdleConnectionsAboveOpenLimit(t *testing.T) {
+	_, err := load(lookup(map[string]string{
+		"DATABASE_URL":      "postgres://example",
+		"DB_MAX_OPEN_CONNS": "5",
+		"DB_MAX_IDLE_CONNS": "6",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "DB_MAX_IDLE_CONNS cannot exceed DB_MAX_OPEN_CONNS") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLoadRequiresDatabaseURL(t *testing.T) {
+	_, err := load(lookup(nil))
+	if err == nil || !strings.Contains(err.Error(), "DATABASE_URL is required") {
+		t.Fatalf("error = %v", err)
+	}
+}
