@@ -120,6 +120,27 @@ func TestNewAddGenerateAndCheck(t *testing.T) {
 	if !strings.Contains(string(ci), "schema diff --env ci --from env://url --to env://src --exclude atlas_schema_revisions --format '{{ sql . \"  \" }}'") {
 		t.Fatal("generated CI does not check migration/schema drift")
 	}
+	moduleFile, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(moduleFile), "go 1.26.4\n\ntoolchain go1.26.5\n") {
+		t.Fatal("generated go.mod does not separate the Go minimum from the preferred toolchain")
+	}
+	if strings.Contains(string(ci), "migrate lint") {
+		t.Fatal("generated CI promises Atlas linting that Community edition does not provide")
+	}
+	if !strings.Contains(string(ci), "migrate apply --env ci") ||
+		!strings.Contains(string(ci), "schema diff --env ci --from env://url --to env://src") {
+		t.Fatal("generated CI does not apply and compare versioned migrations")
+	}
+	makefile, err := os.ReadFile(filepath.Join(root, "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(makefile), "migrate-lint") {
+		t.Fatal("generated Makefile exposes unsupported Atlas Community linting")
+	}
 
 	custom := filepath.Join(root, "internal/resources/task/custom.go")
 	if err := os.WriteFile(custom, []byte("package task\n\nconst Custom = true\n"), 0o644); err != nil {

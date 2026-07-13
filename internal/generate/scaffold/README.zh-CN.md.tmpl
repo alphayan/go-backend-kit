@@ -4,6 +4,11 @@
 
 [English](README.md)
 
+## 环境要求
+
+- Go 1.26.4 或更高版本（Atlas v1.2.3 的最低要求）；推荐 Go 1.26.5 或更新的受支持补丁版本
+- Docker，用于 PostgreSQL 开发环境和 Atlas 迁移
+
 ## 添加资源
 
 ```bash
@@ -23,7 +28,7 @@ make migration name=create_products
 DATABASE_URL='postgres://app:app@localhost:5432/app?sslmode=disable' make migrate-apply
 ```
 
-迁移命令使用固定的开源 Atlas v1.2.3 Community Docker 镜像：先在宿主机运行生成的 GORM Provider，再让 Atlas 使用临时 PostgreSQL 开发库计算差异。应用前请审查 `migrations/` 中的 SQL。生产启动不会调用 `AutoMigrate`。
+迁移命令使用固定的开源 Atlas v1.2.3 Community Docker 镜像：先在宿主机运行生成的 GORM Provider，再让 Atlas 使用临时 PostgreSQL 开发库计算差异。Community 配置用于版本化迁移生成、应用和直接 schema 比较；高级迁移 lint、回滚、迁移测试、审批策略及高级数据库对象治理不在该配置范围内。应用前请审查 `migrations/` 中的 SQL。生产启动不会调用 `AutoMigrate`。
 
 ## 启动
 

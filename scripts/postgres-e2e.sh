@@ -47,7 +47,6 @@ go tool gobackend check
 go mod tidy
 
 ./scripts/atlas.sh migrate diff initial --env local
-./scripts/atlas.sh migrate lint --env ci --latest 1
 ./scripts/atlas.sh migrate apply --env ci
 drift=$(./scripts/atlas.sh schema diff --env ci --from env://url --to env://src --exclude atlas_schema_revisions --format '{{ sql . "  " }}')
 if [ -n "$drift" ]; then

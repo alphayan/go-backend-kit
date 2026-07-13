@@ -79,10 +79,9 @@ jobs:
             echo 'resources exist but no versioned migration was committed'
             exit 1
           fi
-      - name: Lint and apply migrations
+      - name: Apply and compare migrations
         run: |
           if find migrations -type f -name '*.sql' | grep -q .; then
-            ./scripts/atlas.sh migrate lint --env ci --latest 1
             ./scripts/atlas.sh migrate apply --env ci
             drift=$(./scripts/atlas.sh schema diff --env ci --from env://url --to env://src --exclude atlas_schema_revisions --format '{{"{{"}} sql . "  " {{"}}"}}')
             if [ -n "$drift" ]; then

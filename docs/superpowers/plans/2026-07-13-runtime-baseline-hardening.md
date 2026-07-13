@@ -6,7 +6,7 @@
 
 **Architecture:** Keep the existing generator and runtime layers. Template-level assertions protect generated baselines; generated config parses pool settings through a testable environment lookup; the database package owns a `Connection` containing GORM and `database/sql` handles; generated `main` bounds startup probing and owns shutdown.
 
-**Tech Stack:** Go 1.26.0 language baseline, Go 1.26.5 toolchain, Echo v5, GORM v1.31.2, PostgreSQL 17, Atlas v1.2.3 Community, pure-Go SQLite tests.
+**Tech Stack:** Go 1.26.4 language baseline required by Atlas v1.2.3, Go 1.26.5 toolchain, Echo v5, GORM v1.31.2, PostgreSQL 17, Atlas v1.2.3 Community, pure-Go SQLite tests.
 
 ## Global Constraints
 
@@ -35,7 +35,7 @@
 
 **Interfaces:**
 - Consumes: existing `Generator.New` scaffold rendering and PostgreSQL E2E workflow.
-- Produces: generated modules with `go 1.26.0` and `toolchain go1.26.5`; Community-compatible migration checks with no `migrate lint` invocation.
+- Produces: generated modules with `go 1.26.4` and `toolchain go1.26.5`; Community-compatible migration checks with no `migrate lint` invocation.
 
 - [ ] **Step 1: Write failing generated-baseline assertions**
 
@@ -46,7 +46,7 @@ moduleFile, err := os.ReadFile(filepath.Join(root, "go.mod"))
 if err != nil {
 	t.Fatal(err)
 }
-if !strings.Contains(string(moduleFile), "go 1.26.0\n\ntoolchain go1.26.5\n") {
+if !strings.Contains(string(moduleFile), "go 1.26.4\n\ntoolchain go1.26.5\n") {
 	t.Fatal("generated go.mod does not separate the Go minimum from the preferred toolchain")
 }
 if strings.Contains(string(ci), "migrate lint") {
@@ -80,7 +80,7 @@ Expected: FAIL because the generated module still says `go 1.26.5` and generated
 Change both `go.mod` and `internal/generate/scaffold/go.mod.tmpl` to:
 
 ```go
-go 1.26.0
+go 1.26.4
 
 toolchain go1.26.5
 ```
@@ -108,7 +108,7 @@ Retain migration generation, application, schema comparison, PostgreSQL contract
 
 - [ ] **Step 5: Correct documentation**
 
-Change root requirements to `Go 1.26.0 or newer` / `Go 1.26.0 或更高版本`, followed by a sentence recommending Go 1.26.5 or a newer supported patch.
+Change root requirements to `Go 1.26.4 or newer` / `Go 1.26.4 或更高版本`, note that Atlas v1.2.3 sets this floor, and recommend Go 1.26.5 or a newer supported patch.
 
 Change generated README requirements the same way. In all four READMEs, state that the pinned Community image supports the project's migration generation/application path, while advanced linting, rollback, migration testing, approval policies, and advanced database-object governance are outside this open-source profile. Preserve the requirement to review generated SQL before applying it.
 

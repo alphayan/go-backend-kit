@@ -4,6 +4,11 @@ Generated with [go-backend-kit](https://github.com/alphayan/go-backend-kit) {{.V
 
 [中文说明](README.zh-CN.md)
 
+## Requirements
+
+- Go 1.26.4 or newer, as required by Atlas v1.2.3; Go 1.26.5 or a newer supported patch is recommended
+- Docker for PostgreSQL development and Atlas migrations
+
 ## Add a resource
 
 ```bash
@@ -23,7 +28,7 @@ make migration name=create_products
 DATABASE_URL='postgres://app:app@localhost:5432/app?sslmode=disable' make migrate-apply
 ```
 
-The migration command runs the pinned open-source Atlas v1.2.3 Community Docker image. It first executes the generated GORM Provider program on the host, then asks Atlas to diff the desired schema against a temporary PostgreSQL development database. Review the SQL in `migrations/` before applying it.
+The migration command runs the pinned open-source Atlas v1.2.3 Community Docker image. It first executes the generated GORM Provider program on the host, then asks Atlas to diff the desired schema against a temporary PostgreSQL development database. The Community profile is used for versioned migration generation and application plus a direct schema comparison; advanced migration linting, rollback, migration testing, approval policies, and advanced database-object governance are outside this profile. Review the SQL in `migrations/` before applying it.
 
 Production startup never calls `AutoMigrate`.
 

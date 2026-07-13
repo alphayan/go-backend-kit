@@ -6,7 +6,7 @@
 
 ## 环境要求
 
-- Go 1.26.5 或更高版本
+- Go 1.26.4 或更高版本（Atlas v1.2.3 的最低要求）；推荐 Go 1.26.5 或更新的受支持补丁版本
 - Docker，用于 PostgreSQL 开发环境和 Atlas 迁移
 
 ## 快速开始
@@ -65,6 +65,8 @@ go tool gobackend version
 ```
 
 生成项目使用 Go 的 `tool` 指令固定 `gobackend` 和 GORM CLI。Atlas 官方已不再维护可由 Go 安装的当前 CLI 包，因此本地和 CI 都通过 `arigaio/atlas:1.2.3-community` 固定开源 Atlas CLI；Atlas Go 引擎和 GORM Provider 仍固定在 `go.mod`。
+
+Community 配置仅用于生成和应用版本化迁移，以及比较已应用数据库与生成的 GORM schema；本项目不把高级迁移 lint、回滚、迁移测试、审批策略或高级数据库对象治理视为 Community 能力。应用前必须审查每一份生成的 SQL 迁移。
 
 ## 五个接口
 

@@ -18,7 +18,7 @@ remote verification pass, but three baseline details need tightening:
 - Keep the existing Echo v5, GORM, PostgreSQL, Atlas Community, and OpenAPI stack.
 - Make Atlas Community guarantees accurate in CI, scripts, Make targets, and
   documentation.
-- Declare Go 1.26.0 as the compatibility floor and Go 1.26.5 as the preferred
+- Declare Go 1.26.4 as the compatibility floor and Go 1.26.5 as the preferred
   toolchain.
 - Give generated services validated connection-pool defaults, a bounded startup
   database probe, and explicit pool shutdown.
@@ -69,13 +69,15 @@ testing, approval policies, or advanced database-object governance.
 Both the root module and generated module template will declare:
 
 ```go
-go 1.26.0
+go 1.26.4
 
 toolchain go1.26.5
 ```
 
-CI remains pinned to Go 1.26.5. Documentation will describe Go 1.26.0 as the
-minimum and Go 1.26.5 or a newer supported patch as the recommended runtime.
+Atlas v1.2.3 declares Go 1.26.4 as its minimum, so `go mod tidy` cannot retain a
+lower module baseline. CI remains pinned to Go 1.26.5. Documentation will
+describe Go 1.26.4 as the minimum and Go 1.26.5 or a newer supported patch as
+the recommended runtime.
 
 ## Database configuration and lifecycle
 
@@ -121,7 +123,7 @@ application, and defer explicit pool closure. A close error will be logged.
 
 Implementation follows red-green-refactor:
 
-1. Extend generator tests to require `go 1.26.0`, `toolchain go1.26.5`, absence
+1. Extend generator tests to require `go 1.26.4`, `toolchain go1.26.5`, absence
    of `migrate lint`, presence of migration application/schema comparison, and
    the new scaffold test files.
 2. Add generated config tests for defaults, overrides, invalid integers,

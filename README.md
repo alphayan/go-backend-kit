@@ -6,7 +6,7 @@
 
 ## Requirements
 
-- Go 1.26.5 or newer
+- Go 1.26.4 or newer, as required by Atlas v1.2.3; Go 1.26.5 or a newer supported patch is recommended
 - Docker for PostgreSQL development and Atlas migrations
 
 ## Install and create a project
@@ -65,6 +65,8 @@ go tool gobackend version
 ```
 
 Generated projects pin `gobackend` and `gorm` as Go tool dependencies. Atlas no longer maintains its current CLI as a Go-installable package, so the open-source Atlas CLI v1.2.3 is pinned through `arigaio/atlas:1.2.3-community` locally and in CI. The Atlas Go engine and GORM provider are also pinned in `go.mod`.
+
+The Community profile is used to generate and apply versioned migrations and to compare the applied schema with the generated GORM schema. It does not provide this project's advanced migration linting, rollback, migration testing, approval policies, or governance for advanced database objects. Review every generated SQL migration before applying it.
 
 ## Generated API
 
