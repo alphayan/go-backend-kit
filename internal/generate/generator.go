@@ -145,13 +145,7 @@ func (g Generator) Generate(ctx context.Context, root string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := installGenerated(root, desired); err != nil {
-		return err
-	}
-	if err := ensureExtensions(root, resources); err != nil {
-		return err
-	}
-	return nil
+	return installGenerated(root, desired)
 }
 
 func (g Generator) Check(ctx context.Context, root string) error {
@@ -479,25 +473,6 @@ func isManagedGenerated(name string, data []byte) bool {
 		return bytes.Contains(data, []byte(`"x-generated-by": "gobackend"`))
 	}
 	return bytes.Contains(data, []byte(generatedMarker)) || bytes.Contains(data, []byte(gormGeneratedMarker))
-}
-
-func ensureExtensions(root string, resources []spec.Resource) error {
-	for _, resource := range resources {
-		path := filepath.Join(root, "internal", "resources", resource.Package, "custom.go")
-		if _, err := os.Stat(path); err == nil {
-			continue
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return err
-		}
-		content := fmt.Sprintf("// Package %s contains handwritten extensions for %s.\npackage %s\n", resource.Package, resource.Name, resource.Package)
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func marshalJSON(value any) ([]byte, error) {
