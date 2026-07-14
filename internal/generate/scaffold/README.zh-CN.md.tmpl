@@ -16,9 +16,9 @@ go tool gobackend add path/to/resource.yaml
 go tool gobackend check
 ```
 
-`resources/` 中的 YAML 是唯一事实来源。生成文件以 `_gen.go` 或 `_gen_test.go` 结尾；`custom.go` 和其他手写文件永不覆盖。
+`resources/` 中的 YAML 是唯一事实来源。生成文件以 `_gen.go` 或 `_gen_test.go` 结尾；普通手写 `.go` 文件永不覆盖。
 
-`go tool gobackend generate` 会调用固定版本的官方 GORM CLI，重新生成仓储筛选和排序实际使用的字段辅助。
+`go tool gobackend generate` 会调用固定版本的官方 GORM CLI，重新生成 store 筛选和排序实际使用的字段辅助。
 
 ## 数据库与迁移
 

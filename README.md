@@ -105,7 +105,7 @@ Supported scalar types are `string`, `text`, `bool`, `int32`, `int64`, `float64`
 
 Supported field options are `required`, `nullable`, `default`, `unique`, `index`, `enum`, `min`, `max`, `max_length`, `searchable`, `filterable`, and `sortable`. Unknown keys, unsafe names or routes, duplicate base fields, type-invalid defaults, and contradictory constraints fail before any generated file is replaced.
 
-Relations are intentionally not generated in v0.1.0. Use scalar fields such as `user_id` and add domain behavior in the handwritten `custom.go` file, which is never overwritten.
+Relations are intentionally not generated in v0.1.0. Use scalar fields such as `user_id` and add domain behavior in ordinary handwritten `.go` files, which the generator never overwrites.
 
 ## Generated project shape
 
@@ -113,7 +113,7 @@ Relations are intentionally not generated in v0.1.0. Use scalar fields such as `
 cmd/api/                       server entrypoint and graceful shutdown
 internal/app/                  Echo setup and middleware
 internal/platform/             config, database, errors, response, optional fields
-internal/resources/<resource>/ model, DTO, repository, service, handler, routes
+internal/resources/<resource>/ model, DTO, concrete store, HTTP handlers and routes
 internal/resources/<resource>/gormgen/ official GORM CLI field helpers
 openapi/                       generated OpenAPI 3.1 and embedded spec
 resources/                     strict YAML source of truth
@@ -121,7 +121,7 @@ tools/gormschema/              Atlas GORM provider program
 migrations/                    reviewed PostgreSQL SQL migrations
 ```
 
-Only files with the generated marker are managed. `custom.go` and other handwritten files are preserved. Generation is staged, formatted, validated, and installed with per-file atomic replacement. Running generation twice produces no changes; `check` fails on missing, stale, or modified generated files.
+Only files with a recognized generated marker are managed. Handwritten `.go` files are preserved. Generation is staged, formatted, validated, and installed with per-file atomic replacement. Running generation twice produces no changes; `check` fails on missing, stale, or modified generated files.
 
 ## Runtime defaults
 

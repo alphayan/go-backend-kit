@@ -90,13 +90,13 @@ DELETE /api/v1/products/:id
 
 字段属性支持 `required`、`nullable`、`default`、`unique`、`index`、`enum`、`min`、`max`、`max_length`、`searchable`、`filterable`、`sortable`。未知键、危险名称或路由、重复基础字段、默认值类型错误、互相矛盾的约束都会在替换任何生成文件前报错。
 
-首版不生成关联。`user_id` 等业务 ID 作为普通标量字段声明；领域扩展写在不会被覆盖的 `custom.go` 中。
+首版不生成关联。`user_id` 等业务 ID 作为普通标量字段声明；领域扩展直接写在普通手写 `.go` 文件中，生成器永不覆盖。
 
 ## 生成结构与安全边界
 
-项目按功能模块组织：Echo 仅在 handler/router 层，service 和 repository 只接收标准 `context.Context`。共享层提供配置、数据库、统一错误与响应、分页、三态字段和 GORM 泛型 CRUD。每个模型的字段辅助由固定版本的官方 GORM CLI 自动生成，并实际用于仓储筛选与排序。
+每个资源是一个领域内聚包：DTO 负责输入验证和值转换，具体 store 负责 GORM 数据访问，HTTP handler 负责协议边界和短链路编排。代码不生成 repository/service 接口、通用泛型仓储或依赖注入链。固定版本的官方 GORM CLI 继续生成筛选与排序使用的字段辅助。
 
-只有带生成标记的文件会被管理。生成过程先进入临时目录，完成模板渲染、`go/format` 与 OpenAPI 校验后，再逐文件原子替换。连续生成两次无差异；`check` 会发现缺失、陈旧或被修改的生成文件。
+只有带受认可生成标记的文件会被管理；普通手写 `.go` 文件会被保留。生成过程先进入临时目录，完成模板渲染、`go/format` 与 OpenAPI 校验后，再逐文件原子替换。连续生成两次无差异；`check` 会发现缺失、陈旧或被修改的生成文件。
 
 默认包含 request ID、JSON `slog`、panic recover、1 MiB body 限制、15 秒请求超时、安全头、可配置 CORS、标准 `http.Server` 超时和 10 秒优雅停机，并提供 `/health/live`、`/health/ready`、`/openapi.json`、`/docs`。
 
