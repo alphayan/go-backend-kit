@@ -376,6 +376,7 @@ func TestGeneratedProjectCompilesAndRunsContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	run(t, root, "go", "tool", "gobackend", "add", source)
+	run(t, root, "go", "mod", "tidy", "-diff")
 	allTypes := filepath.Join(t.TempDir(), "all_types.yaml")
 	if err := os.WriteFile(allTypes, []byte(allTypesYAML), 0o600); err != nil {
 		t.Fatal(err)
@@ -395,7 +396,6 @@ func TestGeneratedProjectCompilesAndRunsContract(t *testing.T) {
 	run(t, root, "go", "tool", "gobackend", "generate")
 	run(t, root, "go", "tool", "gobackend", "check")
 	run(t, root, "go", "tool", "gorm", "--help")
-	run(t, root, "go", "mod", "tidy")
 	run(t, root, "go", "test", "./...")
 }
 

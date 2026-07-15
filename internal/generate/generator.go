@@ -126,7 +126,7 @@ func (g Generator) Add(ctx context.Context, root, source string) error {
 		_ = os.Remove(destination)
 		return err
 	}
-	return nil
+	return tidyModule(ctx, root)
 }
 
 func (g Generator) Generate(ctx context.Context, root string) error {

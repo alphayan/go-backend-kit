@@ -44,7 +44,6 @@ go tool gobackend add "$root/examples/product.yaml"
 go tool gobackend add "$root/examples/defaults.yaml"
 go tool gobackend generate
 go tool gobackend check
-go mod tidy
 
 ./scripts/atlas.sh migrate diff initial --env local
 ./scripts/atlas.sh migrate apply --env ci
