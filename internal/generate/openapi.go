@@ -8,7 +8,10 @@ import (
 	"github.com/pb33f/libopenapi"
 )
 
-func buildOpenAPI(resources []spec.Resource) map[string]any {
+func buildOpenAPI(resources []spec.Resource) (map[string]any, error) {
+	if err := validateOpenAPIComponentNames(resources); err != nil {
+		return nil, err
+	}
 	paths := map[string]any{}
 	schemas := map[string]any{
 		"Error": map[string]any{
@@ -43,7 +46,34 @@ func buildOpenAPI(resources []spec.Resource) map[string]any {
 		"servers":        []any{map[string]any{"url": "/"}},
 		"paths":          paths,
 		"components":     map[string]any{"schemas": schemas},
+	}, nil
+}
+
+func validateOpenAPIComponentNames(resources []spec.Resource) error {
+	owners := map[string]string{"Error": "built-in error response"}
+	claim := func(name, owner string) error {
+		if existing, exists := owners[name]; exists {
+			return fmt.Errorf("OpenAPI component schema %q is claimed by both %s and %s", name, existing, owner)
+		}
+		owners[name] = owner
+		return nil
 	}
+	for _, resource := range resources {
+		claims := []struct {
+			name  string
+			owner string
+		}{
+			{resource.Name, fmt.Sprintf("resource %q model", resource.Name)},
+			{"Create" + resource.Name + "Input", fmt.Sprintf("resource %q create input", resource.Name)},
+			{"Update" + resource.Name + "Input", fmt.Sprintf("resource %q update input", resource.Name)},
+		}
+		for _, candidate := range claims {
+			if err := claim(candidate.name, candidate.owner); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func openAPISchemas(resource spec.Resource) (map[string]any, map[string]any, map[string]any) {

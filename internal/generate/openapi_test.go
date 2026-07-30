@@ -2,12 +2,70 @@ package generate
 
 import (
 	"bytes"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/alphayan/go-backend-kit/internal/spec"
 	"github.com/pb33f/libopenapi"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
+
+func TestOpenAPIRejectsComponentNameCollisions(t *testing.T) {
+	tests := map[string]struct {
+		resourceNames []string
+		component     string
+		owners        []string
+	}{
+		"fixed Error schema": {
+			resourceNames: []string{"Error"},
+			component:     "Error",
+			owners:        []string{"built-in error response", `resource "Error" model`},
+		},
+		"derived create input": {
+			resourceNames: []string{"CreateFooInput", "Foo"},
+			component:     "CreateFooInput",
+			owners:        []string{`resource "CreateFooInput" model`, `resource "Foo" create input`},
+		},
+		"derived update input": {
+			resourceNames: []string{"Foo", "UpdateFooInput"},
+			component:     "UpdateFooInput",
+			owners:        []string{`resource "Foo" update input`, `resource "UpdateFooInput" model`},
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			resources := make([]spec.Resource, 0, len(test.resourceNames))
+			for _, resourceName := range test.resourceNames {
+				resources = append(resources, parseOpenAPIResource(t, resourceName))
+			}
+			_, err := renderGenerated("example.com/api", resources)
+			if err == nil {
+				t.Fatal("renderGenerated() error = nil, want component collision")
+			}
+			for _, want := range append([]string{test.component}, test.owners...) {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("renderGenerated() error = %q, want %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func parseOpenAPIResource(t *testing.T, name string) spec.Resource {
+	t.Helper()
+	lower := strings.ToLower(name)
+	resource, err := spec.Parse([]byte(fmt.Sprintf(`schema_version: 1
+name: %s
+table: %ss
+route: /%ss
+fields: []
+`, name, lower, lower)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resource
+}
 
 func TestOpenAPIPreservesNullableConstraintsAndDecimal(t *testing.T) {
 	resource, err := spec.Parse([]byte(`schema_version: 1
@@ -27,7 +85,10 @@ fields:
 	if err != nil {
 		t.Fatal(err)
 	}
-	document := buildOpenAPI([]spec.Resource{resource})
+	document, err := buildOpenAPI([]spec.Resource{resource})
+	if err != nil {
+		t.Fatal(err)
+	}
 	components := document["components"].(map[string]any)
 	schemas := components["schemas"].(map[string]any)
 	create := schemas["CreateInvoiceInput"].(map[string]any)
@@ -81,7 +142,10 @@ fields:
 	if err != nil {
 		t.Fatal(err)
 	}
-	document := buildOpenAPI([]spec.Resource{resource})
+	document, err := buildOpenAPI([]spec.Resource{resource})
+	if err != nil {
+		t.Fatal(err)
+	}
 	components := document["components"].(map[string]any)
 	schemas := components["schemas"].(map[string]any)
 	create := schemas["CreateDocumentInput"].(map[string]any)

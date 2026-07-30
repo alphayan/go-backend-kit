@@ -58,7 +58,10 @@ func renderGenerated(modulePath string, resources []spec.Resource) (map[string][
 		}
 		files[name] = output
 	}
-	document := buildOpenAPI(resources)
+	document, err := buildOpenAPI(resources)
+	if err != nil {
+		return nil, err
+	}
 	data, err := marshalJSON(document)
 	if err != nil {
 		return nil, err
