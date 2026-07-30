@@ -189,6 +189,9 @@ func renderDesired(ctx context.Context, root, modulePath string, resources []spe
 		return nil, err
 	}
 	if len(resources) == 0 {
+		if err := addGeneratedManifest(desired); err != nil {
+			return nil, err
+		}
 		return desired, nil
 	}
 	stage, err := os.MkdirTemp(root, ".gobackend-gorm-*")
@@ -221,6 +224,9 @@ func renderDesired(ctx context.Context, root, modulePath string, resources []spe
 			return nil, fmt.Errorf("read GORM field helpers for %s: %w", resource.Name, err)
 		}
 		desired["internal/resources/"+resource.Package+"/gormgen/query_gen.go"] = generated
+	}
+	if err := addGeneratedManifest(desired); err != nil {
+		return nil, err
 	}
 	return desired, nil
 }
@@ -431,48 +437,18 @@ func installGenerated(root string, desired map[string][]byte) error {
 	return nil
 }
 
-func staleGenerated(root string, desired map[string][]byte) ([]string, error) {
-	var stale []string
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			if strings.HasPrefix(entry.Name(), ".gobackend-") || entry.Name() == ".git" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
-		if _, ok := desired[rel]; ok {
-			return nil
-		}
-		managedName := strings.HasSuffix(rel, "_gen.go") || strings.HasSuffix(rel, "_gen_test.go") || rel == "openapi/openapi_gen.json"
-		if !managedName {
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		if isManagedGenerated(rel, data) {
-			stale = append(stale, rel)
-		}
-		return nil
-	})
-	sort.Strings(stale)
-	return stale, err
-}
-
 func isManagedGenerated(name string, data []byte) bool {
+	if name == generatedManifestName {
+		_, err := parseGeneratedManifest(data)
+		return err == nil
+	}
 	if name == "openapi/openapi_gen.json" {
 		return bytes.Contains(data, []byte(`"x-generated-by": "gobackend"`))
 	}
-	return bytes.Contains(data, []byte(generatedMarker)) || bytes.Contains(data, []byte(gormGeneratedMarker))
+	if bytes.Contains(data, []byte(generatedMarker)) {
+		return true
+	}
+	return isGORMHelperPath(name) && bytes.Contains(data, []byte(gormGeneratedMarker))
 }
 
 func marshalJSON(value any) ([]byte, error) {
