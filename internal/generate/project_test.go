@@ -1,6 +1,7 @@
 package generate_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/alphayan/go-backend-kit/internal/generate"
+	"golang.org/x/mod/modfile"
+	"golang.org/x/mod/semver"
 )
 
 const taskYAML = `schema_version: 1
@@ -312,6 +315,34 @@ func TestNewWritesGeneratedManifest(t *testing.T) {
 	}
 }
 
+func TestNewPinsRemediatedSecurityDependencies(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "api")
+	g := testGenerator(t)
+	if err := g.New(t.Context(), root, "example.com/api"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	module, err := modfile.Parse("go.mod", data, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	versions := make(map[string]string, len(module.Require))
+	for _, requirement := range module.Require {
+		versions[requirement.Mod.Path] = requirement.Mod.Version
+	}
+	for dependency, minimum := range map[string]string{
+		"google.golang.org/grpc":   "v1.82.1",
+		"go.opentelemetry.io/otel": "v1.41.0",
+	} {
+		if got := versions[dependency]; !semver.IsValid(got) || semver.Compare(got, minimum) < 0 {
+			t.Errorf("%s version = %q, want at least %s", dependency, got, minimum)
+		}
+	}
+}
+
 func TestGenerateRemovesManifestOwnedUnchangedStaleFiles(t *testing.T) {
 	root, g := generatedTaskProject(t)
 	if err := os.Remove(filepath.Join(root, "resources", "task.yaml")); err != nil {
@@ -498,6 +529,26 @@ func TestGeneratedProjectCompilesAndRunsContract(t *testing.T) {
 	run(t, root, "go", "tool", "gobackend", "check")
 	run(t, root, "go", "tool", "gorm", "--help")
 	run(t, root, "go", "test", "./...")
+}
+
+func TestGeneratedGORMHelperMatchesOfficialCLI(t *testing.T) {
+	root, _ := generatedTaskProject(t)
+	output := filepath.Join(t.TempDir(), "gormgen")
+	run(t, root, "go", "tool", "gorm", "gen",
+		"-i", filepath.Join(root, "internal", "resources", "task", "model_gen.go"),
+		"-o", output,
+	)
+	want, err := os.ReadFile(filepath.Join(output, "model_gen.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "internal", "resources", "task", "gormgen", "query_gen.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("generated GORM helper differs from the pinned official GORM CLI output")
+	}
 }
 
 func run(t *testing.T, dir, name string, args ...string) {
