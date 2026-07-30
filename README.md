@@ -64,7 +64,7 @@ go tool gobackend check
 go tool gobackend version
 ```
 
-Generated projects pin `gobackend` and `gorm` as Go tool dependencies. Atlas no longer maintains its current CLI as a Go-installable package, so the open-source Atlas CLI v1.2.3 is pinned through `arigaio/atlas:1.2.3-community` locally and in CI. The Atlas Go engine and GORM provider are also pinned in `go.mod`.
+Generated projects pin `gobackend` and `gorm` as Go tool dependencies. `go tool gobackend generate` invokes the pinned official `go tool gorm gen` workflow; the official GORM CLI remains the sole producer of `gormgen/query_gen.go`, and gobackend does not rewrite its output. Atlas no longer maintains its current CLI as a Go-installable package, so the open-source Atlas CLI v1.2.3 is pinned through `arigaio/atlas:1.2.3-community` locally and in CI. The Atlas Go engine and GORM provider are also pinned in `go.mod`.
 
 The Community profile is used to generate and apply versioned migrations and to compare the applied schema with the generated GORM schema. It does not provide this project's advanced migration linting, rollback, migration testing, approval policies, or governance for advanced database objects. Review every generated SQL migration before applying it.
 
@@ -110,6 +110,7 @@ Relations are intentionally not generated in v0.1.0. Use scalar fields such as `
 ## Generated project shape
 
 ```text
+.gobackend-generated.json       generated-file ownership and SHA-256 digests
 cmd/api/                       server entrypoint and graceful shutdown
 internal/app/                  Echo setup and middleware
 internal/platform/             config, database, errors, response, optional fields
@@ -121,7 +122,7 @@ tools/gormschema/              Atlas GORM provider program
 migrations/                    reviewed PostgreSQL SQL migrations
 ```
 
-Only files with a recognized generated marker are managed. Handwritten `.go` files are preserved. Generation is staged, formatted, validated, and installed with per-file atomic replacement. Running generation twice produces no changes; `check` fails on missing, stale, or modified generated files.
+`.gobackend-generated.json` records the exact generator-owned paths and their SHA-256 digests. Handwritten `.go` files and unrelated official GORM output are preserved. A stale manifest-owned file is removed only when its bytes still match the recorded digest; if it was modified, generation stops with an error instead of deleting it. Generation is staged, formatted, validated, and installed with per-file atomic replacement. Running generation twice produces no changes; `check` fails on missing, stale, or modified generated files.
 
 ## Runtime defaults
 

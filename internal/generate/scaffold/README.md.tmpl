@@ -16,9 +16,9 @@ go tool gobackend add path/to/resource.yaml
 go tool gobackend check
 ```
 
-The YAML files in `resources/` are the source of truth. Generated files end in `_gen.go` or `_gen_test.go`; handwritten `.go` files are never overwritten.
+The YAML files in `resources/` are the source of truth. The tracked `.gobackend-generated.json` manifest records every generator-owned path and its SHA-256 digest; handwritten `.go` files are never overwritten. A stale generated file is removed only if its bytes still match the manifest. If it was modified, generation fails safely instead of deleting it.
 
-`go tool gobackend generate` invokes the pinned official GORM CLI to regenerate field helpers used by store filters and sorting.
+`go tool gobackend generate` invokes the pinned official `go tool gorm gen` workflow to regenerate field helpers used by store filters and sorting. The official GORM CLI is the sole producer of `gormgen/query_gen.go`; gobackend does not rewrite that output.
 
 ## Database and migrations
 

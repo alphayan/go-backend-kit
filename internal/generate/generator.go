@@ -69,7 +69,7 @@ func (g Generator) New(ctx context.Context, target, modulePath string) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(stage)
+	defer func() { _ = os.RemoveAll(stage) }()
 
 	if err := renderScaffold(ctx, stage, projectData{Module: modulePath, Version: g.Version, DevelopmentReplace: filepath.ToSlash(g.DevelopmentReplace)}); err != nil {
 		return err
@@ -198,7 +198,7 @@ func renderDesired(ctx context.Context, root, modulePath string, resources []spe
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(stage)
+	defer func() { _ = os.RemoveAll(stage) }()
 	for _, resource := range resources {
 		modelName := "internal/resources/" + resource.Package + "/model_gen.go"
 		model, ok := desired[modelName]
@@ -403,7 +403,7 @@ func installGenerated(root string, desired map[string][]byte) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(stage)
+	defer func() { _ = os.RemoveAll(stage) }()
 	names := make([]string, 0, len(desired))
 	for name, data := range desired {
 		names = append(names, name)

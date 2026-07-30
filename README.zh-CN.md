@@ -64,7 +64,7 @@ go tool gobackend check
 go tool gobackend version
 ```
 
-生成项目使用 Go 的 `tool` 指令固定 `gobackend` 和 GORM CLI。Atlas 官方已不再维护可由 Go 安装的当前 CLI 包，因此本地和 CI 都通过 `arigaio/atlas:1.2.3-community` 固定开源 Atlas CLI；Atlas Go 引擎和 GORM Provider 仍固定在 `go.mod`。
+生成项目使用 Go 的 `tool` 指令固定 `gobackend` 和 GORM CLI。`go tool gobackend generate` 保留官方 `go tool gorm gen` 工作流；`gormgen/query_gen.go` 只由官方 GORM CLI 生成，gobackend 不重写其输出。Atlas 官方已不再维护可由 Go 安装的当前 CLI 包，因此本地和 CI 都通过 `arigaio/atlas:1.2.3-community` 固定开源 Atlas CLI；Atlas Go 引擎和 GORM Provider 仍固定在 `go.mod`。
 
 Community 配置仅用于生成和应用版本化迁移，以及比较已应用数据库与生成的 GORM schema；本项目不把高级迁移 lint、回滚、迁移测试、审批策略或高级数据库对象治理视为 Community 能力。应用前必须审查每一份生成的 SQL 迁移。
 
@@ -96,7 +96,7 @@ DELETE /api/v1/products/:id
 
 每个资源是一个领域内聚包：DTO 负责输入验证和值转换，具体 store 负责 GORM 数据访问，HTTP handler 负责协议边界和短链路编排。代码不生成 repository/service 接口、通用泛型仓储或依赖注入链。固定版本的官方 GORM CLI 继续生成筛选与排序使用的字段辅助。
 
-只有带受认可生成标记的文件会被管理；普通手写 `.go` 文件会被保留。生成过程先进入临时目录，完成模板渲染、`go/format` 与 OpenAPI 校验后，再逐文件原子替换。连续生成两次无差异；`check` 会发现缺失、陈旧或被修改的生成文件。
+项目根目录的 `.gobackend-generated.json` 记录生成器实际拥有的路径及其 SHA-256 摘要；普通手写 `.go` 文件和无关的官方 GORM 输出都会被保留。清理陈旧文件时，只有当前内容仍与清单摘要完全一致才会删除；一旦检测到人工修改，生成会报错停止，不会删除该文件。生成过程先进入临时目录，完成模板渲染、`go/format` 与 OpenAPI 校验后，再逐文件原子替换。连续生成两次无差异；`check` 会发现缺失、陈旧或被修改的生成文件。
 
 默认包含 request ID、JSON `slog`、panic recover、1 MiB body 限制、15 秒请求超时、安全头、可配置 CORS、标准 `http.Server` 超时和 10 秒优雅停机，并提供 `/health/live`、`/health/ready`、`/openapi.json`、`/docs`。
 
