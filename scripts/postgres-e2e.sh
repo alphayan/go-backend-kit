@@ -7,7 +7,7 @@ container=""
 
 cleanup() {
   if [ -n "$container" ]; then
-    docker rm -f "$container" >/dev/null 2>&1 || true
+    docker rm -fv "$container" >/dev/null 2>&1 || true
   fi
   rm -rf "$tmp"
 }
