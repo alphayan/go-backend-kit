@@ -11,6 +11,7 @@ import (
 	"text/template"
 
 	"github.com/alphayan/go-backend-kit/internal/spec"
+	"github.com/shopspring/decimal"
 )
 
 type resourceData struct {
@@ -103,8 +104,8 @@ func executeGoTemplate(name, body string, data any) ([]byte, error) {
 		"zeroGo":                zeroGoValue,
 		"filterRaw":             filterRawValue,
 		"searchRaw":             searchRawValue,
-		"minValue":              func(f spec.Field) float64 { return *f.Min },
-		"maxValue":              func(f spec.Field) float64 { return *f.Max },
+		"minValue":              func(f spec.Field) string { return f.Min.String() },
+		"maxValue":              func(f spec.Field) string { return f.Max.String() },
 		"maxLength":             func(f spec.Field) int { return *f.MaxLength },
 	}
 	tmpl, err := template.New(name).Funcs(functions).Option("missingkey=error").Parse(body)
@@ -317,7 +318,7 @@ func zeroAllowed(field spec.Field) bool {
 	case spec.TypeBool:
 		return true
 	case spec.TypeInt32, spec.TypeInt64, spec.TypeFloat64, spec.TypeDecimal:
-		return (field.Min == nil || *field.Min <= 0) && (field.Max == nil || *field.Max >= 0)
+		return numericZeroAllowed(field)
 	case spec.TypeString, spec.TypeText:
 		return len(field.Enum) == 0
 	default:
@@ -425,7 +426,7 @@ func firstZero(resource spec.Resource) *spec.Field {
 		case spec.TypeBool:
 			return true
 		case spec.TypeInt32, spec.TypeInt64, spec.TypeFloat64, spec.TypeDecimal:
-			return (field.Min == nil || *field.Min <= 0) && (field.Max == nil || *field.Max >= 0)
+			return numericZeroAllowed(field)
 		case spec.TypeString, spec.TypeText:
 			return len(field.Enum) == 0
 		default:
@@ -443,12 +444,14 @@ func sampleGoValue(field spec.Field) string {
 		return strconv.Quote("x")
 	case spec.TypeBool:
 		return "true"
-	case spec.TypeInt32, spec.TypeInt64:
-		return strconv.FormatFloat(sampleInteger(field), 'f', 0, 64)
+	case spec.TypeInt32:
+		return "int32(" + sampleInteger(field) + ")"
+	case spec.TypeInt64:
+		return "int64(" + sampleInteger(field) + ")"
 	case spec.TypeFloat64:
-		return strconv.FormatFloat(sampleNumber(field), 'g', -1, 64)
+		return sampleFloatNumber(field)
 	case spec.TypeDecimal:
-		return strconv.Quote(strconv.FormatFloat(sampleNumber(field), 'g', -1, 64))
+		return strconv.Quote(sampleNumber(field))
 	case spec.TypeTime:
 		return strconv.Quote("2026-01-02T11:04:05+08:00")
 	case spec.TypeUUID:
@@ -485,9 +488,11 @@ func filterRawValue(field spec.Field) string {
 	case spec.TypeBool:
 		return "true"
 	case spec.TypeInt32, spec.TypeInt64:
-		return strconv.FormatFloat(sampleInteger(field), 'f', 0, 64)
-	case spec.TypeFloat64, spec.TypeDecimal:
-		return strconv.FormatFloat(sampleNumber(field), 'g', -1, 64)
+		return sampleInteger(field)
+	case spec.TypeFloat64:
+		return sampleFloatNumber(field)
+	case spec.TypeDecimal:
+		return sampleNumber(field)
 	case spec.TypeTime:
 		return "2026-01-02T03:04:05Z"
 	case spec.TypeUUID:
@@ -499,26 +504,58 @@ func filterRawValue(field spec.Field) string {
 	}
 }
 
-func sampleInteger(field spec.Field) float64 {
-	value := float64(42)
-	if field.Min != nil && value < *field.Min {
-		value = math.Ceil(*field.Min)
-	}
-	if field.Max != nil && value > *field.Max {
-		value = math.Floor(*field.Max)
-	}
-	return value
+func numericZeroAllowed(field spec.Field) bool {
+	return (field.Min == nil || !field.Min.Decimal().GreaterThan(decimal.Zero)) &&
+		(field.Max == nil || !field.Max.Decimal().LessThan(decimal.Zero))
 }
 
-func sampleNumber(field spec.Field) float64 {
+func sampleInteger(field spec.Field) string {
+	value := decimal.NewFromInt(42)
+	if field.Min != nil && value.LessThan(field.Min.Decimal()) {
+		value = field.Min.Decimal().Ceil()
+	}
+	if field.Max != nil && value.GreaterThan(field.Max.Decimal()) {
+		value = field.Max.Decimal().Floor()
+	}
+	return value.StringFixed(0)
+}
+
+func sampleNumber(field spec.Field) string {
+	value := decimal.RequireFromString("12.5")
+	if field.Min != nil && value.LessThan(field.Min.Decimal()) {
+		value = field.Min.Decimal()
+	}
+	if field.Max != nil && value.GreaterThan(field.Max.Decimal()) {
+		value = field.Max.Decimal()
+	}
+	return value.String()
+}
+
+func sampleFloatNumber(field spec.Field) string {
 	value := 12.5
-	if field.Min != nil && value < *field.Min {
-		value = *field.Min
+	if field.Min != nil && decimal.NewFromFloat(value).LessThan(field.Min.Decimal()) {
+		value = float64AtLeast(field.Min.Decimal())
 	}
-	if field.Max != nil && value > *field.Max {
-		value = *field.Max
+	if field.Max != nil && decimal.NewFromFloat(value).GreaterThan(field.Max.Decimal()) {
+		value = float64AtMost(field.Max.Decimal())
 	}
-	return value
+	return strconv.FormatFloat(value, 'g', -1, 64)
+}
+
+func float64AtLeast(value decimal.Decimal) float64 {
+	number, _ := value.Float64()
+	if decimal.NewFromFloat(number).LessThan(value) {
+		number = math.Nextafter(number, math.Inf(1))
+	}
+	return number
+}
+
+func float64AtMost(value decimal.Decimal) float64 {
+	number, _ := value.Float64()
+	if decimal.NewFromFloat(number).GreaterThan(value) {
+		number = math.Nextafter(number, math.Inf(-1))
+	}
+	return number
 }
 
 func searchRawValue(field spec.Field) string {
@@ -579,8 +616,8 @@ func validateCreate(input Create{{.Resource.Name}}Input) validation.Details {
 {{range .Resource.Fields}}	validation.Presence(details, {{quote .Name}}, input.{{.GoName}}.IsSet(), input.{{.GoName}}.IsNull(), {{.Required}}, {{.Nullable}})
 {{if .MaxLength}}	if value, ok := input.{{.GoName}}.Value(); ok { validation.MaxLength(details, {{quote .Name}}, value, {{maxLength .}}) }
 {{end}}{{if .Enum}}	if value, ok := input.{{.GoName}}.Value(); ok { validation.OneOf(details, {{quote .Name}}, value, []string{ {{range .Enum}}{{quote .}},{{end}} }) }
-{{end}}{{if .Min}}	if value, ok := input.{{.GoName}}.Value(); ok { validation.Min(details, {{quote .Name}}, value, {{minValue .}}) }
-{{end}}{{if .Max}}	if value, ok := input.{{.GoName}}.Value(); ok { validation.Max(details, {{quote .Name}}, value, {{maxValue .}}) }
+{{end}}{{if .Min}}	if value, ok := input.{{.GoName}}.Value(); ok { validation.Min(details, {{quote .Name}}, value, {{quote (minValue .)}}) }
+{{end}}{{if .Max}}	if value, ok := input.{{.GoName}}.Value(); ok { validation.Max(details, {{quote .Name}}, value, {{quote (maxValue .)}}) }
 {{end}}{{end}}	return details
 }
 
@@ -589,8 +626,8 @@ func validateUpdate(input Update{{.Resource.Name}}Input) validation.Details {
 {{range .Resource.Fields}}	validation.Presence(details, {{quote .Name}}, input.{{.GoName}}.IsSet(), input.{{.GoName}}.IsNull(), false, {{.Nullable}})
 {{if .MaxLength}}	if value, ok := input.{{.GoName}}.Value(); ok { validation.MaxLength(details, {{quote .Name}}, value, {{maxLength .}}) }
 {{end}}{{if .Enum}}	if value, ok := input.{{.GoName}}.Value(); ok { validation.OneOf(details, {{quote .Name}}, value, []string{ {{range .Enum}}{{quote .}},{{end}} }) }
-{{end}}{{if .Min}}	if value, ok := input.{{.GoName}}.Value(); ok { validation.Min(details, {{quote .Name}}, value, {{minValue .}}) }
-{{end}}{{if .Max}}	if value, ok := input.{{.GoName}}.Value(); ok { validation.Max(details, {{quote .Name}}, value, {{maxValue .}}) }
+{{end}}{{if .Min}}	if value, ok := input.{{.GoName}}.Value(); ok { validation.Min(details, {{quote .Name}}, value, {{quote (minValue .)}}) }
+{{end}}{{if .Max}}	if value, ok := input.{{.GoName}}.Value(); ok { validation.Max(details, {{quote .Name}}, value, {{quote (maxValue .)}}) }
 {{end}}{{end}}	return details
 }
 

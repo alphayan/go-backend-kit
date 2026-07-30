@@ -85,8 +85,25 @@ func TestParseRejectsInvalidSpecs(t *testing.T) {
 		"search number":       strings.Replace(validProduct, "name: owner_id\n    type: int64", "name: owner_id\n    type: int64\n    searchable: true", 1),
 		"bad numeric range":   strings.Replace(validProduct, "sortable: true", "sortable: true\n    min: 10\n    max: 1", 1),
 		"integer empty range": strings.Replace(validProduct, "sortable: true", "sortable: true\n    min: 0.1\n    max: 0.9", 1),
-		"enum too long":       strings.Replace(validProduct, "enum: [enabled, disabled]", "enum: [enabled, disabled]\n    max_length: 3", 1),
-		"default above max":   strings.Replace(validProduct, "sortable: true", "sortable: true\n    default: 11\n    max: 10", 1),
+		"float64 empty range": strings.Replace(
+			strings.Replace(validProduct, "type: int64", "type: float64", 1),
+			"sortable: true",
+			"sortable: true\n    min: 12.5000000000000001\n    max: 12.5000000000000002",
+			1,
+		),
+		"enum too long":     strings.Replace(validProduct, "enum: [enabled, disabled]", "enum: [enabled, disabled]\n    max_length: 3", 1),
+		"default above max": strings.Replace(validProduct, "sortable: true", "sortable: true\n    default: 11\n    max: 10", 1),
+		"exact int64 default above max": strings.Replace(
+			validProduct,
+			"sortable: true",
+			"sortable: true\n    default: 9007199254740993\n    max: 9007199254740992",
+			1,
+		),
+		"exact decimal default above max": validProduct + `  - name: amount
+    type: decimal
+    default: "9007199254740993"
+    max: 9007199254740992
+`,
 		"default too long":    validProduct + "  - name: code\n    type: string\n    default: abc\n    max_length: 2\n",
 		"bad decimal default": validProduct + "  - name: amount\n    type: decimal\n    default: not-a-decimal\n",
 		"nonfinite maximum":   strings.Replace(validProduct, "sortable: true", "sortable: true\n    max: .inf", 1),
@@ -111,5 +128,42 @@ func TestParseIsDeterministic(t *testing.T) {
 	}
 	if a.Fingerprint() != b.Fingerprint() {
 		t.Fatalf("fingerprints differ: %q != %q", a.Fingerprint(), b.Fingerprint())
+	}
+}
+
+func TestFingerprintUsesCanonicalNumericBounds(t *testing.T) {
+	withBound := func(bound string) string {
+		return strings.Replace(validProduct, "sortable: true", "sortable: true\n    max: "+bound, 1)
+	}
+	a, err := spec.Parse([]byte(withBound("1.00")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := spec.Parse([]byte(withBound("1e0")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Fingerprint() != b.Fingerprint() {
+		t.Fatalf("equivalent numeric bounds changed fingerprint: %q != %q", a.Fingerprint(), b.Fingerprint())
+	}
+}
+
+func TestParseNormalizesFloat64DefaultBeforeConstraintComparison(t *testing.T) {
+	resource, err := spec.Parse([]byte(`schema_version: 1
+name: Reading
+table: readings
+route: /readings
+fields:
+  - name: value
+    type: float64
+    default: 9007199254740993
+    max: 9007199254740992
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := resource.Fields[0].Default.(float64)
+	if !ok || got != 9007199254740992 {
+		t.Fatalf("float64 default = %#v, want normalized float64 value", resource.Fields[0].Default)
 	}
 }

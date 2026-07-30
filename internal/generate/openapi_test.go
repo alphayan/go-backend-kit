@@ -1,6 +1,7 @@
 package generate
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/alphayan/go-backend-kit/internal/spec"
@@ -41,7 +42,8 @@ fields:
 		t.Fatalf("nullable enum constraint is outside its value schema: %#v", state)
 	}
 	amount := properties["amount"].(map[string]any)
-	if amount["type"] != "string" || amount["format"] != "decimal" || amount["x-minimum"] != float64(0) {
+	minimum, ok := amount["x-minimum"].(spec.Number)
+	if amount["type"] != "string" || amount["format"] != "decimal" || !ok || minimum.String() != "0" {
 		t.Fatalf("decimal schema = %#v", amount)
 	}
 	if amount["default"] != "2.5" {
@@ -54,6 +56,9 @@ fields:
 	encoded, err := marshalJSON(document)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded, []byte(`"x-minimum": 0`)) {
+		t.Fatalf("decimal minimum was not encoded as a JSON number:\n%s", encoded)
 	}
 	parsed, err := libopenapi.NewDocument(encoded)
 	if err != nil {

@@ -2,6 +2,7 @@ package validation
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/shopspring/decimal"
 )
@@ -33,30 +34,32 @@ func OneOf(details Details, name, value string, allowed []string) {
 	details[name] = "must be one of the allowed values"
 }
 
-func Min(details Details, name string, value any, minimum float64) {
-	if number, ok := asFloat(value); ok && number < minimum {
-		details[name] = fmt.Sprintf("must be at least %v", minimum)
+func Min(details Details, name string, value any, minimum string) {
+	if number, ok := asDecimal(value); ok && number.LessThan(decimal.RequireFromString(minimum)) {
+		details[name] = fmt.Sprintf("must be at least %s", minimum)
 	}
 }
 
-func Max(details Details, name string, value any, maximum float64) {
-	if number, ok := asFloat(value); ok && number > maximum {
-		details[name] = fmt.Sprintf("must be at most %v", maximum)
+func Max(details Details, name string, value any, maximum string) {
+	if number, ok := asDecimal(value); ok && number.GreaterThan(decimal.RequireFromString(maximum)) {
+		details[name] = fmt.Sprintf("must be at most %s", maximum)
 	}
 }
 
-func asFloat(value any) (float64, bool) {
+func asDecimal(value any) (decimal.Decimal, bool) {
 	switch value := value.(type) {
 	case int32:
-		return float64(value), true
+		return decimal.NewFromInt(int64(value)), true
 	case int64:
-		return float64(value), true
+		return decimal.NewFromInt(value), true
 	case float64:
-		return value, true
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return decimal.Decimal{}, false
+		}
+		return decimal.NewFromFloat(value), true
 	case decimal.Decimal:
-		number, _ := value.Float64()
-		return number, true
+		return value, true
 	default:
-		return 0, false
+		return decimal.Decimal{}, false
 	}
 }

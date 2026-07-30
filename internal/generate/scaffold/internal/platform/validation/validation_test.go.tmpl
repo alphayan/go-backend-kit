@@ -1,0 +1,33 @@
+package validation
+
+import (
+	"testing"
+
+	"github.com/shopspring/decimal"
+)
+
+func TestNumericBoundsPreserveExactPrecision(t *testing.T) {
+	tests := map[string]func(Details){
+		"int64 maximum": func(details Details) {
+			Max(details, "value", int64(9007199254740993), "9007199254740992")
+		},
+		"decimal maximum": func(details Details) {
+			Max(details, "value", decimal.RequireFromString("9007199254740993"), "9007199254740992")
+		},
+		"int64 minimum": func(details Details) {
+			Min(details, "value", int64(9007199254740991), "9007199254740992")
+		},
+		"decimal minimum": func(details Details) {
+			Min(details, "value", decimal.RequireFromString("9007199254740991"), "9007199254740992")
+		},
+	}
+	for name, validate := range tests {
+		t.Run(name, func(t *testing.T) {
+			details := Details{}
+			validate(details)
+			if _, exists := details["value"]; !exists {
+				t.Fatal("validation accepted a value outside the exact bound")
+			}
+		})
+	}
+}

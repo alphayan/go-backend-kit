@@ -100,8 +100,8 @@ type Field struct {
 	Unique     bool      `json:"unique"`
 	Index      bool      `json:"index"`
 	Enum       []string  `json:"enum,omitempty"`
-	Min        *float64  `json:"min,omitempty"`
-	Max        *float64  `json:"max,omitempty"`
+	Min        *Number   `json:"min,omitempty"`
+	Max        *Number   `json:"max,omitempty"`
 	MaxLength  *int      `json:"max_length,omitempty"`
 	Searchable bool      `json:"searchable"`
 	Filterable bool      `json:"filterable"`
@@ -125,8 +125,8 @@ type rawField struct {
 	Unique     bool      `yaml:"unique"`
 	Index      bool      `yaml:"index"`
 	Enum       []string  `yaml:"enum"`
-	Min        *float64  `yaml:"min"`
-	Max        *float64  `yaml:"max"`
+	Min        *Number   `yaml:"min"`
+	Max        *Number   `yaml:"max"`
 	MaxLength  *int      `yaml:"max_length"`
 	Searchable bool      `yaml:"searchable"`
 	Filterable bool      `yaml:"filterable"`
@@ -246,24 +246,24 @@ func normalizeField(raw rawField) (Field, error) {
 		if !isNumeric(raw.Type) {
 			return Field{}, errors.New("min and max are only valid for numeric fields")
 		}
-		if raw.Min != nil && !finite(*raw.Min) || raw.Max != nil && !finite(*raw.Max) {
-			return Field{}, errors.New("min and max must be finite")
-		}
-		if raw.Min != nil && raw.Max != nil && *raw.Min > *raw.Max {
+		if raw.Min != nil && raw.Max != nil && raw.Min.Decimal().GreaterThan(raw.Max.Decimal()) {
 			return Field{}, errors.New("min cannot be greater than max")
 		}
+		if raw.Type == TypeFloat64 && !floatRangeRepresentable(raw.Min, raw.Max) {
+			return Field{}, errors.New("min and max contain no value representable by float64")
+		}
 		if raw.Type == TypeInt32 || raw.Type == TypeInt64 {
-			minimum, maximum := float64(math.MinInt64), float64(math.MaxInt64)
+			minimum, maximum := decimal.NewFromInt(math.MinInt64), decimal.NewFromInt(math.MaxInt64)
 			if raw.Type == TypeInt32 {
-				minimum, maximum = math.MinInt32, math.MaxInt32
+				minimum, maximum = decimal.NewFromInt(math.MinInt32), decimal.NewFromInt(math.MaxInt32)
 			}
-			if raw.Min != nil && *raw.Min > minimum {
-				minimum = *raw.Min
+			if raw.Min != nil && raw.Min.Decimal().GreaterThan(minimum) {
+				minimum = raw.Min.Decimal()
 			}
-			if raw.Max != nil && *raw.Max < maximum {
-				maximum = *raw.Max
+			if raw.Max != nil && raw.Max.Decimal().LessThan(maximum) {
+				maximum = raw.Max.Decimal()
 			}
-			if math.Ceil(minimum) > math.Floor(maximum) {
+			if minimum.Ceil().GreaterThan(maximum.Floor()) {
 				return Field{}, errors.New("min and max contain no value representable by the integer type")
 			}
 		}
@@ -290,8 +290,11 @@ func normalizeField(raw rawField) (Field, error) {
 		if err := validateDefault(raw.Type, defaultValue); err != nil {
 			return Field{}, err
 		}
+		if raw.Type == TypeFloat64 {
+			defaultValue, _ = number(defaultValue)
+		}
 		if raw.Type == TypeDecimal {
-			value, _ := decimal.NewFromString(fmt.Sprint(defaultValue))
+			value, _ := constraintDecimal(defaultValue)
 			defaultValue = value.String()
 		}
 		if raw.MaxLength != nil {
@@ -300,14 +303,14 @@ func normalizeField(raw rawField) (Field, error) {
 			}
 		}
 		if raw.Min != nil || raw.Max != nil {
-			value, ok := constraintNumber(defaultValue)
+			value, ok := constraintValue(raw.Type, defaultValue)
 			if !ok {
 				return Field{}, errors.New("numeric default cannot be compared to min or max")
 			}
-			if raw.Min != nil && value < *raw.Min {
+			if raw.Min != nil && value.LessThan(raw.Min.Decimal()) {
 				return Field{}, errors.New("default is less than min")
 			}
-			if raw.Max != nil && value > *raw.Max {
+			if raw.Max != nil && value.GreaterThan(raw.Max.Decimal()) {
 				return Field{}, errors.New("default is greater than max")
 			}
 		}
@@ -352,13 +355,14 @@ func validateDefault(fieldType FieldType, value any) error {
 			return errors.New("default must be numeric")
 		}
 	case TypeDecimal:
-		if number, ok := number(value); ok {
-			if !finite(number) {
-				return errors.New("decimal default must be finite")
-			}
-		} else if text, ok := value.(string); !ok || !decimalPattern.MatchString(text) {
+		if _, ok := constraintDecimal(value); ok {
+			break
+		}
+		text, ok := value.(string)
+		if !ok || !decimalPattern.MatchString(text) {
 			return errors.New("decimal default must be a decimal number")
-		} else if _, err := decimal.NewFromString(text); err != nil {
+		}
+		if _, err := decimal.NewFromString(text); err != nil {
 			return errors.New("decimal default must be a decimal number")
 		}
 	case TypeTime:
@@ -408,15 +412,75 @@ func number(value any) (float64, bool) {
 	return n, ok
 }
 
-func constraintNumber(value any) (float64, bool) {
-	if value, ok := number(value); ok {
-		return value, true
+func constraintDecimal(value any) (decimal.Decimal, bool) {
+	switch value := value.(type) {
+	case int:
+		return decimal.NewFromInt(int64(value)), true
+	case int64:
+		return decimal.NewFromInt(value), true
+	case uint64:
+		number, err := decimal.NewFromString(strconv.FormatUint(value, 10))
+		return number, err == nil
+	case float64:
+		if finite(value) {
+			return decimal.NewFromFloat(value), true
+		}
+	case string:
+		number, err := decimal.NewFromString(value)
+		return number, err == nil
 	}
-	if text, ok := value.(string); ok {
-		value, err := strconv.ParseFloat(text, 64)
-		return value, err == nil
+	return decimal.Decimal{}, false
+}
+
+func constraintValue(fieldType FieldType, value any) (decimal.Decimal, bool) {
+	if fieldType == TypeFloat64 {
+		floatValue, ok := number(value)
+		if !ok || !finite(floatValue) {
+			return decimal.Decimal{}, false
+		}
+		return decimal.NewFromFloat(floatValue), true
 	}
-	return 0, false
+	return constraintDecimal(value)
+}
+
+func floatRangeRepresentable(minimum, maximum *Number) bool {
+	lower, upper := -math.MaxFloat64, math.MaxFloat64
+	var ok bool
+	if minimum != nil {
+		lower, ok = float64Ceil(minimum.Decimal())
+		if !ok {
+			return false
+		}
+	}
+	if maximum != nil {
+		upper, ok = float64Floor(maximum.Decimal())
+		if !ok {
+			return false
+		}
+	}
+	return lower <= upper
+}
+
+func float64Ceil(value decimal.Decimal) (float64, bool) {
+	number, _ := value.Float64()
+	if !finite(number) || number == 0 && !value.IsZero() {
+		return 0, false
+	}
+	if decimal.NewFromFloat(number).LessThan(value) {
+		number = math.Nextafter(number, math.Inf(1))
+	}
+	return number, finite(number)
+}
+
+func float64Floor(value decimal.Decimal) (float64, bool) {
+	number, _ := value.Float64()
+	if !finite(number) || number == 0 && !value.IsZero() {
+		return 0, false
+	}
+	if decimal.NewFromFloat(number).GreaterThan(value) {
+		number = math.Nextafter(number, math.Inf(-1))
+	}
+	return number, finite(number)
 }
 
 func finite(value float64) bool {
