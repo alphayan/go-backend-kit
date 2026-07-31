@@ -10,9 +10,10 @@ import (
 
 func TestNumberNormalizesYAMLNumbers(t *testing.T) {
 	tests := map[string]string{
-		"1.00": "1",
-		"1e2":  "100",
-		"+0":   "0",
+		"1.00":          "1",
+		"1e2":           "100",
+		"+0":            "0",
+		"0e-2147483647": "0",
 	}
 	for input, want := range tests {
 		t.Run(input, func(t *testing.T) {
@@ -53,6 +54,16 @@ func TestNumberPreservesExactJSONNumber(t *testing.T) {
 	}
 	if got := number.Decimal().String(); got != "9007199254740993" {
 		t.Fatalf("Decimal() = %q", got)
+	}
+}
+
+func TestNumberRejectsExcessiveCanonicalExpansion(t *testing.T) {
+	for _, input := range []string{"1e1048577", "1e-1048577"} {
+		t.Run(input, func(t *testing.T) {
+			if _, err := parseNumber(input); err == nil {
+				t.Fatal("parse Number error = nil, want bounded expansion error")
+			}
+		})
 	}
 }
 

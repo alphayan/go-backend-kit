@@ -49,8 +49,8 @@ func addGeneratedManifest(desired map[string][]byte) error {
 	return nil
 }
 
-func readGeneratedManifest(root string) (generatedManifest, bool, error) {
-	data, err := os.ReadFile(filepath.Join(root, generatedManifestName))
+func readGeneratedManifestFromRoot(root *os.Root) (generatedManifest, bool, error) {
+	data, err := root.ReadFile(generatedManifestName)
 	if errors.Is(err, os.ErrNotExist) {
 		return generatedManifest{}, false, nil
 	}
@@ -93,7 +93,12 @@ func parseGeneratedManifest(data []byte) (generatedManifest, error) {
 }
 
 func staleGenerated(root string, desired map[string][]byte) ([]string, error) {
-	manifest, exists, err := readGeneratedManifest(root)
+	rootDir, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, fmt.Errorf("open project root: %w", err)
+	}
+	defer func() { _ = rootDir.Close() }()
+	manifest, exists, err := readGeneratedManifestFromRoot(rootDir)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +111,7 @@ func staleGenerated(root string, desired map[string][]byte) ([]string, error) {
 		if _, ok := desired[name]; ok {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(name)))
+		data, err := rootDir.ReadFile(filepath.FromSlash(name))
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -164,7 +169,7 @@ func legacyStaleGenerated(root string, desired map[string][]byte) ([]string, err
 }
 
 func validateGeneratedPath(name string) error {
-	if name == "" || name != path.Clean(name) || path.IsAbs(name) || name == "." || strings.HasPrefix(name, "../") {
+	if name == "" || strings.Contains(name, `\`) || name != path.Clean(name) || path.IsAbs(name) || name == "." || strings.HasPrefix(name, "../") {
 		return fmt.Errorf("generated manifest path %q is unsafe", name)
 	}
 	native := filepath.FromSlash(name)
@@ -186,7 +191,7 @@ func isGeneratedOutputPath(name string) bool {
 		return true
 	}
 	parts := strings.Split(name, "/")
-	if len(parts) == 4 && parts[0] == "internal" && parts[1] == "resources" && parts[2] != "" {
+	if len(parts) == 4 && parts[0] == "internal" && parts[1] == "resources" && isResourcePackage(parts[2]) {
 		return strings.HasSuffix(parts[3], "_gen.go") || strings.HasSuffix(parts[3], "_gen_test.go")
 	}
 	return isGORMHelperPath(name)
@@ -197,9 +202,23 @@ func isGORMHelperPath(name string) bool {
 	return len(parts) == 5 &&
 		parts[0] == "internal" &&
 		parts[1] == "resources" &&
-		parts[2] != "" &&
+		isResourcePackage(parts[2]) &&
 		parts[3] == "gormgen" &&
 		parts[4] == "query_gen.go"
+}
+
+func isResourcePackage(name string) bool {
+	if name == "" || name[0] < 'a' || name[0] > 'z' {
+		return false
+	}
+	for i := 1; i < len(name); i++ {
+		letter := name[i] >= 'a' && name[i] <= 'z'
+		digit := name[i] >= '0' && name[i] <= '9'
+		if !letter && !digit {
+			return false
+		}
+	}
+	return true
 }
 
 func generatedDigest(data []byte) string {

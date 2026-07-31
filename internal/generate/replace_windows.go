@@ -2,8 +2,8 @@
 
 package generate
 
-import "golang.org/x/sys/windows"
+import "os"
 
-func replaceFile(source, target string) error {
-	return windows.Rename(source, target)
+func replaceFile(root *os.Root, source, target string) error {
+	return root.Rename(source, target)
 }

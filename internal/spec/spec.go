@@ -218,7 +218,9 @@ func normalizeField(raw rawField) (Field, error) {
 	hasDefault := raw.Default.Kind != 0
 	var defaultValue any
 	if hasDefault {
-		if err := raw.Default.Decode(&defaultValue); err != nil {
+		var err error
+		defaultValue, err = decodeDefault(raw)
+		if err != nil {
 			return Field{}, fmt.Errorf("decode default: %w", err)
 		}
 	}
@@ -287,15 +289,16 @@ func normalizeField(raw rawField) (Field, error) {
 		}
 	}
 	if hasDefault && defaultValue != nil {
-		if err := validateDefault(raw.Type, defaultValue); err != nil {
-			return Field{}, err
-		}
-		if raw.Type == TypeFloat64 {
-			defaultValue, _ = number(defaultValue)
-		}
 		if raw.Type == TypeDecimal {
-			value, _ := constraintDecimal(defaultValue)
-			defaultValue = value.String()
+			value, err := normalizeDecimalDefault(defaultValue)
+			if err != nil {
+				return Field{}, err
+			}
+			defaultValue = value
+		} else if err := validateDefault(raw.Type, defaultValue); err != nil {
+			return Field{}, err
+		} else if raw.Type == TypeFloat64 {
+			defaultValue, _ = number(defaultValue)
 		}
 		if raw.MaxLength != nil {
 			if value, ok := defaultValue.(string); ok && utf8.RuneCountInString(value) > *raw.MaxLength {
@@ -331,6 +334,47 @@ func normalizeField(raw rawField) (Field, error) {
 	}, nil
 }
 
+func decodeDefault(raw rawField) (any, error) {
+	node := &raw.Default
+	for node.Kind == yaml.AliasNode && node.Alias != nil {
+		node = node.Alias
+	}
+	if raw.Type == TypeDecimal && node.Kind == yaml.ScalarNode && (node.Tag == "!!int" || node.Tag == "!!float") {
+		var number Number
+		if err := number.UnmarshalYAML(node); err != nil {
+			return nil, err
+		}
+		return number.String(), nil
+	}
+	var value any
+	if err := raw.Default.Decode(&value); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+func normalizeDecimalDefault(value any) (string, error) {
+	if text, ok := value.(string); ok {
+		if !decimalPattern.MatchString(text) {
+			return "", errors.New("decimal default must be a decimal number")
+		}
+		canonical, err := canonicalNumberString(text)
+		if err != nil {
+			return "", errors.New("decimal default must be a bounded decimal number")
+		}
+		return canonical, nil
+	}
+	number, ok := constraintDecimal(value)
+	if !ok {
+		return "", errors.New("decimal default must be a decimal number")
+	}
+	canonical, err := canonicalNumber(number)
+	if err != nil {
+		return "", errors.New("decimal default must be a bounded decimal number")
+	}
+	return canonical, nil
+}
+
 func validateDefault(fieldType FieldType, value any) error {
 	switch fieldType {
 	case TypeString, TypeText:
@@ -353,17 +397,6 @@ func validateDefault(fieldType FieldType, value any) error {
 	case TypeFloat64:
 		if number, ok := number(value); !ok || !finite(number) {
 			return errors.New("default must be numeric")
-		}
-	case TypeDecimal:
-		if _, ok := constraintDecimal(value); ok {
-			break
-		}
-		text, ok := value.(string)
-		if !ok || !decimalPattern.MatchString(text) {
-			return errors.New("decimal default must be a decimal number")
-		}
-		if _, err := decimal.NewFromString(text); err != nil {
-			return errors.New("decimal default must be a decimal number")
 		}
 	case TypeTime:
 		text, ok := value.(string)
@@ -463,7 +496,7 @@ func floatRangeRepresentable(minimum, maximum *Number) bool {
 
 func float64Ceil(value decimal.Decimal) (float64, bool) {
 	number, _ := value.Float64()
-	if !finite(number) || number == 0 && !value.IsZero() {
+	if !finite(number) {
 		return 0, false
 	}
 	if decimal.NewFromFloat(number).LessThan(value) {
@@ -474,7 +507,7 @@ func float64Ceil(value decimal.Decimal) (float64, bool) {
 
 func float64Floor(value decimal.Decimal) (float64, bool) {
 	number, _ := value.Float64()
-	if !finite(number) || number == 0 && !value.IsZero() {
+	if !finite(number) {
 		return 0, false
 	}
 	if decimal.NewFromFloat(number).GreaterThan(value) {

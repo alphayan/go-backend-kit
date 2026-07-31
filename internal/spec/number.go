@@ -2,10 +2,13 @@ package spec
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/shopspring/decimal"
 	"gopkg.in/yaml.v3"
 )
+
+const maxCanonicalNumberLength = 1 << 20
 
 // Number is an exact, canonical decimal representation of a YAML number.
 type Number struct {
@@ -17,11 +20,11 @@ func (n *Number) UnmarshalYAML(node *yaml.Node) error {
 	if node.Kind != yaml.ScalarNode || node.Tag != "!!int" && node.Tag != "!!float" {
 		return errors.New("must be a YAML number")
 	}
-	value, err := decimal.NewFromString(node.Value)
+	canonical, err := canonicalNumberString(node.Value)
 	if err != nil {
-		return errors.New("must be a finite YAML number")
+		return fmt.Errorf("must be a bounded finite YAML number: %w", err)
 	}
-	n.canonical = value.String()
+	n.canonical = canonical
 	return nil
 }
 
@@ -41,4 +44,39 @@ func (n Number) MarshalJSON() ([]byte, error) {
 		return nil, errors.New("cannot encode an empty number")
 	}
 	return []byte(n.canonical), nil
+}
+
+func canonicalNumberString(raw string) (string, error) {
+	if len(raw) > maxCanonicalNumberLength {
+		return "", errors.New("number is too long")
+	}
+	value, err := decimal.NewFromString(raw)
+	if err != nil {
+		return "", errors.New("number is invalid")
+	}
+	return canonicalNumber(value)
+}
+
+func canonicalNumber(value decimal.Decimal) (string, error) {
+	if value.IsZero() {
+		return "0", nil
+	}
+	digits := int64(value.NumDigits())
+	exponent := int64(value.Exponent())
+	var length int64
+	switch {
+	case exponent >= 0:
+		length = digits + exponent
+	case digits > -exponent:
+		length = digits + 1
+	default:
+		length = 2 - exponent
+	}
+	if value.IsNegative() {
+		length++
+	}
+	if length > maxCanonicalNumberLength {
+		return "", errors.New("canonical number is too long")
+	}
+	return value.String(), nil
 }

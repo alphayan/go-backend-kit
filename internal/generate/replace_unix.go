@@ -4,6 +4,6 @@ package generate
 
 import "os"
 
-func replaceFile(source, target string) error {
-	return os.Rename(source, target)
+func replaceFile(root *os.Root, source, target string) error {
+	return root.Rename(source, target)
 }

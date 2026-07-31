@@ -385,6 +385,50 @@ func TestGeneratePreservesModifiedManifestOwnedStaleFiles(t *testing.T) {
 	}
 }
 
+func TestGenerateRejectsManifestSymlinkEscape(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "api")
+	g := testGenerator(t)
+	if err := g.New(t.Context(), root, "example.com/api"); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(base, "task.yaml")
+	if err := os.WriteFile(source, []byte(taskYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Add(t.Context(), root, source); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "resources", "task.yaml")); err != nil {
+		t.Fatal(err)
+	}
+
+	resourceRoot := filepath.Join(root, "internal", "resources", "task")
+	outside := filepath.Join(base, "outside-task")
+	if err := os.Rename(resourceRoot, outside); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, resourceRoot); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	model := filepath.Join(outside, "model_gen.go")
+	before, err := os.ReadFile(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := g.Generate(t.Context(), root); err == nil {
+		t.Fatal("Generate() error = nil, want root-confined path error")
+	}
+	after, err := os.ReadFile(model)
+	if err != nil {
+		t.Fatalf("external generated file was removed: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("external generated file was modified")
+	}
+}
+
 func TestGenerateNeverOverwritesUnownedManagedPath(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "api")
 	g := testGenerator(t)

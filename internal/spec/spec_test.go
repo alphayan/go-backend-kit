@@ -104,6 +104,11 @@ func TestParseRejectsInvalidSpecs(t *testing.T) {
     default: "9007199254740993"
     max: 9007199254740992
 `,
+		"exact unquoted decimal default above max": validProduct + `  - name: ratio
+    type: decimal
+    default: 0.10000000000000001
+    max: 0.1
+`,
 		"default too long":    validProduct + "  - name: code\n    type: string\n    default: abc\n    max_length: 2\n",
 		"bad decimal default": validProduct + "  - name: amount\n    type: decimal\n    default: not-a-decimal\n",
 		"nonfinite maximum":   strings.Replace(validProduct, "sortable: true", "sortable: true\n    max: .inf", 1),
@@ -165,5 +170,46 @@ fields:
 	got, ok := resource.Fields[0].Default.(float64)
 	if !ok || got != 9007199254740992 {
 		t.Fatalf("float64 default = %#v, want normalized float64 value", resource.Fields[0].Default)
+	}
+}
+
+func TestParseAcceptsRepresentableSubnormalFloatBounds(t *testing.T) {
+	tests := map[string]string{
+		"positive minimum": "min: 1e-400",
+		"negative maximum": "max: -1e-400",
+	}
+	for name, constraint := range tests {
+		t.Run(name, func(t *testing.T) {
+			input := `schema_version: 1
+name: Reading
+table: readings
+route: /readings
+fields:
+  - name: value
+    type: float64
+    ` + constraint + "\n"
+			if _, err := spec.Parse([]byte(input)); err != nil {
+				t.Fatalf("Parse() rejected representable subnormal range: %v", err)
+			}
+		})
+	}
+}
+
+func TestParsePreservesUnquotedDecimalDefault(t *testing.T) {
+	resource, err := spec.Parse([]byte(`schema_version: 1
+name: Reading
+table: readings
+route: /readings
+fields:
+  - name: value
+    type: decimal
+    default: 0.10000000000000001
+    max: 0.10000000000000001
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := resource.Fields[0].Default, "0.10000000000000001"; got != want {
+		t.Fatalf("decimal default = %#v, want %q", got, want)
 	}
 }

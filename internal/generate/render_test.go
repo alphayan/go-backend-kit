@@ -22,6 +22,14 @@ func TestFloatSampleSatisfiesExactBound(t *testing.T) {
 			constraint: "max: 12.4999999999999999",
 			valid:      func(value, bound decimal.Decimal) bool { return !value.GreaterThan(bound) },
 		},
+		"subnormal minimum": {
+			constraint: "min: 1e-400",
+			valid:      func(value, bound decimal.Decimal) bool { return !value.LessThan(bound) },
+		},
+		"subnormal maximum": {
+			constraint: "max: -1e-400",
+			valid:      func(value, bound decimal.Decimal) bool { return !value.GreaterThan(bound) },
+		},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {

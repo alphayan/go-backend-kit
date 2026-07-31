@@ -386,14 +386,26 @@ func loadResources(dir string) ([]spec.Resource, error) {
 }
 
 func installGenerated(root string, desired map[string][]byte) error {
+	return installGeneratedWithRemove(root, desired, func(root *os.Root, name string) error {
+		return root.Remove(filepath.FromSlash(name))
+	})
+}
+
+type removeGeneratedFunc func(root *os.Root, name string) error
+
+func installGeneratedWithRemove(root string, desired map[string][]byte, remove removeGeneratedFunc) error {
+	rootDir, err := os.OpenRoot(root)
+	if err != nil {
+		return fmt.Errorf("open project root: %w", err)
+	}
+	defer func() { _ = rootDir.Close() }()
 	for name := range desired {
-		target := filepath.Join(root, filepath.FromSlash(name))
-		data, err := os.ReadFile(target)
+		data, err := rootDir.ReadFile(filepath.FromSlash(name))
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return err
+			return fmt.Errorf("read generated target %s: %w", name, err)
 		}
 		if !isManagedGenerated(name, data) {
 			return fmt.Errorf("refusing to overwrite unowned file %s", name)
@@ -405,8 +417,13 @@ func installGenerated(root string, desired map[string][]byte) error {
 	}
 	defer func() { _ = os.RemoveAll(stage) }()
 	names := make([]string, 0, len(desired))
+	hasManifest := false
 	for name, data := range desired {
-		names = append(names, name)
+		if name == generatedManifestName {
+			hasManifest = true
+		} else {
+			names = append(names, name)
+		}
 		target := filepath.Join(stage, filepath.FromSlash(name))
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
@@ -421,17 +438,23 @@ func installGenerated(root string, desired map[string][]byte) error {
 		return err
 	}
 	for _, name := range names {
-		target := filepath.Join(root, filepath.FromSlash(name))
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		native := filepath.FromSlash(name)
+		if err := rootDir.MkdirAll(filepath.Dir(native), 0o755); err != nil {
 			return err
 		}
-		if err := replaceFile(filepath.Join(stage, filepath.FromSlash(name)), target); err != nil {
+		source := filepath.Join(filepath.Base(stage), native)
+		if err := replaceFile(rootDir, source, native); err != nil {
 			return fmt.Errorf("replace %s: %w", name, err)
 		}
 	}
 	for _, name := range stale {
-		if err := os.Remove(filepath.Join(root, filepath.FromSlash(name))); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+		if err := remove(rootDir, name); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove stale generated file %s: %w", name, err)
+		}
+	}
+	if hasManifest {
+		if err := replaceFile(rootDir, filepath.Join(filepath.Base(stage), generatedManifestName), generatedManifestName); err != nil {
+			return fmt.Errorf("replace %s: %w", generatedManifestName, err)
 		}
 	}
 	return nil
