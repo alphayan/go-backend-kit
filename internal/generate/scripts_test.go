@@ -1,14 +1,18 @@
 package generate_test
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/alphayan/go-backend-kit/internal/generate"
 )
+
+const fakeContainerID = "fake-container-id"
 
 func TestTemporaryPostgresCleanupRemovesAnonymousVolumes(t *testing.T) {
 	t.Run("root PostgreSQL E2E failure", func(t *testing.T) {
@@ -47,6 +51,63 @@ func TestTemporaryPostgresCleanupRemovesAnonymousVolumes(t *testing.T) {
 	})
 }
 
+func TestTemporaryPostgresCleanupRequiresSuccessfulCreation(t *testing.T) {
+	t.Run("root Docker creation failure", func(t *testing.T) {
+		kitRoot, err := filepath.Abs(filepath.Join("..", ".."))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tools, log := fakeScriptTools(t, "#!/bin/sh\nexit 0\n")
+		command := exec.Command("sh", filepath.Join(kitRoot, "scripts", "postgres-e2e.sh"))
+		command.Dir = kitRoot
+		command.Env = append(scriptTestEnv(tools, log), "FAKE_DOCKER_RUN_FAIL=1")
+		if output, err := command.CombinedOutput(); err == nil {
+			t.Fatalf("postgres-e2e.sh unexpectedly succeeded:\n%s", output)
+		}
+		assertNoContainerCleanup(t, log)
+	})
+
+	t.Run("generated Atlas pre-creation failure", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "api")
+		kitRoot, err := filepath.Abs(filepath.Join("..", ".."))
+		if err != nil {
+			t.Fatal(err)
+		}
+		generator := generate.Generator{Version: "v0.1.0", DevelopmentReplace: kitRoot}
+		if err := generator.New(t.Context(), root, "example.com/api"); err != nil {
+			t.Fatal(err)
+		}
+		tools, log := fakeScriptTools(t, "#!/bin/sh\nexit 23\n")
+		command := exec.Command("sh", filepath.Join(root, "scripts", "atlas.sh"), "migrate", "status")
+		command.Dir = root
+		command.Env = scriptTestEnv(tools, log)
+		if output, err := command.CombinedOutput(); err == nil {
+			t.Fatalf("atlas.sh unexpectedly succeeded:\n%s", output)
+		}
+		assertNoContainerCleanup(t, log)
+	})
+
+	t.Run("generated Atlas Docker creation failure", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "api")
+		kitRoot, err := filepath.Abs(filepath.Join("..", ".."))
+		if err != nil {
+			t.Fatal(err)
+		}
+		generator := generate.Generator{Version: "v0.1.0", DevelopmentReplace: kitRoot}
+		if err := generator.New(t.Context(), root, "example.com/api"); err != nil {
+			t.Fatal(err)
+		}
+		tools, log := fakeScriptTools(t, "#!/bin/sh\nexit 0\n")
+		command := exec.Command("sh", filepath.Join(root, "scripts", "atlas.sh"), "migrate", "status")
+		command.Dir = root
+		command.Env = append(scriptTestEnv(tools, log), "FAKE_DOCKER_RUN_FAIL=1")
+		if output, err := command.CombinedOutput(); err == nil {
+			t.Fatalf("atlas.sh unexpectedly succeeded:\n%s", output)
+		}
+		assertNoContainerCleanup(t, log)
+	})
+}
+
 func fakeScriptTools(t *testing.T, goScript string) (string, string) {
 	t.Helper()
 	root := t.TempDir()
@@ -54,6 +115,12 @@ func fakeScriptTools(t *testing.T, goScript string) (string, string) {
 	dockerScript := `#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
 case "$1" in
+  run)
+    printf '%s\n' '` + fakeContainerID + `'
+    if [ "${FAKE_DOCKER_RUN_FAIL:-}" = 1 ]; then
+      exit 23
+    fi
+    ;;
   port)
     printf '%s\n' '0.0.0.0:55432'
     ;;
@@ -76,6 +143,7 @@ func scriptTestEnv(tools, log string) []string {
 		if strings.HasPrefix(value, "PATH=") ||
 			strings.HasPrefix(value, "DATABASE_URL=") ||
 			strings.HasPrefix(value, "ATLAS_DATABASE_URL=") ||
+			strings.HasPrefix(value, "FAKE_DOCKER_RUN_FAIL=") ||
 			strings.HasPrefix(value, "FAKE_DOCKER_LOG=") {
 			continue
 		}
@@ -96,30 +164,25 @@ func assertExactContainerCleanup(t *testing.T, log string) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	container := ""
-	for _, line := range lines {
-		fields := strings.Fields(line)
-		if len(fields) < 4 || fields[0] != "run" || fields[1] != "-d" {
-			continue
-		}
-		for i := 2; i+1 < len(fields); i++ {
-			if fields[i] == "--name" {
-				container = fields[i+1]
-				break
-			}
-		}
-		if container != "" {
-			break
-		}
-	}
-	if container == "" {
-		t.Fatalf("docker log has no named detached container:\n%s", data)
-	}
-	want := "rm -fv " + container
-	for _, line := range lines {
-		if line == want {
-			return
-		}
+	want := "rm -fv " + fakeContainerID
+	if slices.Contains(lines, want) {
+		return
 	}
 	t.Fatalf("docker cleanup did not run %q:\n%s", want, data)
+}
+
+func assertNoContainerCleanup(t *testing.T, log string) {
+	t.Helper()
+	data, err := os.ReadFile(log)
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+		if strings.HasPrefix(line, "rm ") {
+			t.Fatalf("container cleanup ran without successful creation:\n%s", data)
+		}
+	}
 }

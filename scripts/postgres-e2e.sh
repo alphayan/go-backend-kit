@@ -14,12 +14,13 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 if [ -z "${DATABASE_URL:-}" ]; then
-  container="go-backend-kit-e2e-$$"
-  docker run -d --name "$container" \
+  container_name="go-backend-kit-e2e-$$"
+  created_container=$(docker run -d --name "$container_name" \
     -e POSTGRES_DB=kit_test \
     -e POSTGRES_USER=kit \
     -e POSTGRES_PASSWORD=kit \
-    -P postgres:17-alpine >/dev/null
+    -P postgres:17-alpine)
+  container=$created_container
   port=$(docker port "$container" 5432/tcp | head -n 1 | awk -F: '{print $NF}')
   DATABASE_URL="postgres://kit:kit@localhost:${port}/kit_test?sslmode=disable"
   export DATABASE_URL

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"text/template"
@@ -100,7 +101,13 @@ func (g Generator) New(ctx context.Context, target, modulePath string) error {
 	return nil
 }
 
-func (g Generator) Add(ctx context.Context, root, source string) error {
+func (g Generator) Add(ctx context.Context, root, source string) (err error) {
+	root, unlock, err := lockProject(ctx, root)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, unlock()) }()
+
 	data, err := os.ReadFile(source)
 	if err != nil {
 		return fmt.Errorf("read resource: %w", err)
@@ -122,14 +129,23 @@ func (g Generator) Add(ctx context.Context, root, source string) error {
 	if err := os.WriteFile(destination, data, 0o644); err != nil {
 		return fmt.Errorf("copy resource: %w", err)
 	}
-	if err := g.Generate(ctx, root); err != nil {
+	if err := g.generate(ctx, root); err != nil {
 		_ = os.Remove(destination)
 		return err
 	}
 	return tidyModule(ctx, root)
 }
 
-func (g Generator) Generate(ctx context.Context, root string) error {
+func (g Generator) Generate(ctx context.Context, root string) (err error) {
+	root, unlock, err := lockProject(ctx, root)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, unlock()) }()
+	return g.generate(ctx, root)
+}
+
+func (g Generator) generate(ctx context.Context, root string) error {
 	modulePath, err := readModule(root)
 	if err != nil {
 		return err
@@ -148,7 +164,13 @@ func (g Generator) Generate(ctx context.Context, root string) error {
 	return installGenerated(root, desired)
 }
 
-func (g Generator) Check(ctx context.Context, root string) error {
+func (g Generator) Check(ctx context.Context, root string) (err error) {
+	root, unlock, err := lockProject(ctx, root)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, unlock()) }()
+
 	modulePath, err := readModule(root)
 	if err != nil {
 		return err
@@ -244,7 +266,7 @@ func goReadonlyEnvironment() []string {
 	environment := os.Environ()
 	for i := len(environment) - 1; i >= 0; i-- {
 		if strings.HasPrefix(environment[i], "GOFLAGS=") {
-			environment = append(environment[:i], environment[i+1:]...)
+			environment = slices.Delete(environment, i, i+1)
 		}
 	}
 	return append(environment, "GOFLAGS=-mod=readonly")
@@ -259,8 +281,8 @@ func installIntoEmptyDirectory(stage, target string) error {
 	for _, entry := range entries {
 		name := entry.Name()
 		if err := os.Rename(filepath.Join(stage, name), filepath.Join(target, name)); err != nil {
-			for i := len(moved) - 1; i >= 0; i-- {
-				_ = os.Rename(filepath.Join(target, moved[i]), filepath.Join(stage, moved[i]))
+			for _, movedName := range slices.Backward(moved) {
+				_ = os.Rename(filepath.Join(target, movedName), filepath.Join(stage, movedName))
 			}
 			return fmt.Errorf("install project into current directory: %w", err)
 		}

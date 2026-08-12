@@ -5,17 +5,21 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 mkdir -p .gobackend
 schema=.gobackend/schema.sql
-dev_container="gobackend-atlas-dev-$$"
+dev_container=""
 cleanup() {
-  docker rm -fv "$dev_container" >/dev/null 2>&1 || true
+  if [ -n "$dev_container" ]; then
+    docker rm -fv "$dev_container" >/dev/null 2>&1 || true
+  fi
   rm -f "$schema"
 }
 trap cleanup EXIT HUP INT TERM
 go run ./tools/gormschema > "$schema"
 
-docker run -d --name "$dev_container" \
+dev_container_name="gobackend-atlas-dev-$$"
+created_dev_container=$(docker run -d --name "$dev_container_name" \
   -e POSTGRES_PASSWORD=atlas \
-  -P postgres:17-alpine >/dev/null
+  -P postgres:17-alpine)
+dev_container=$created_dev_container
 attempts=0
 until docker exec "$dev_container" pg_isready -U postgres >/dev/null 2>&1; do
   attempts=$((attempts + 1))

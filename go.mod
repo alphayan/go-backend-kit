@@ -7,6 +7,7 @@ toolchain go1.26.5
 tool golang.org/x/vuln/cmd/govulncheck
 
 require (
+	github.com/gofrs/flock v0.13.0
 	github.com/pb33f/libopenapi v0.38.6
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	github.com/shopspring/decimal v1.4.0
@@ -22,7 +23,7 @@ require (
 	github.com/kr/text v0.2.0 // indirect
 	github.com/pb33f/jsonpath v0.8.2 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
-	github.com/rogpeppe/go-internal v1.15.0 // indirect
+	github.com/rogpeppe/go-internal v1.16.0 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.6 // indirect
 	golang.org/x/sync v0.22.0 // indirect
