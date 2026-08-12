@@ -76,7 +76,7 @@ func load(getenv envLookup) (Config, error) {
 		RequestTimeout:                15 * time.Second,
 	}
 	if raw := strings.TrimSpace(getenv("CORS_ORIGINS")); raw != "" {
-		for _, origin := range strings.Split(raw, ",") {
+		for origin := range strings.SplitSeq(raw, ",") {
 			if origin = strings.TrimSpace(origin); origin != "" {
 				cfg.CORSOrigins = append(cfg.CORSOrigins, origin)
 			}

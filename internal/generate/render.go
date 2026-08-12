@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"go/format"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"text/template"
@@ -160,17 +161,22 @@ func modelGoType(field spec.Field) string {
 }
 
 func modelImports(resource spec.Resource) string {
-	imports := []string{"\"time\"", "\"gorm.io/gorm\""}
+	standardLibrary := []string{"\"time\""}
+	thirdParty := []string{"\"gorm.io/gorm\""}
 	if hasType(resource, spec.TypeUUID) {
-		imports = append(imports, "\"github.com/google/uuid\"")
+		thirdParty = append(thirdParty, "\"github.com/google/uuid\"")
 	}
 	if hasType(resource, spec.TypeDecimal) {
-		imports = append(imports, "\"github.com/shopspring/decimal\"")
+		thirdParty = append(thirdParty, "\"github.com/shopspring/decimal\"")
 	}
 	if hasType(resource, spec.TypeJSON) {
-		imports = append(imports, "\"gorm.io/datatypes\"")
+		thirdParty = append(thirdParty, "\"gorm.io/datatypes\"")
 	}
-	return strings.Join(imports, "\n")
+	sort.Strings(thirdParty)
+	return strings.Join([]string{
+		strings.Join(standardLibrary, "\n"),
+		strings.Join(thirdParty, "\n"),
+	}, "\n\n")
 }
 
 func dtoImports(resource spec.Resource) string {
@@ -300,8 +306,7 @@ func sortableFields(resource spec.Resource) []spec.Field {
 func firstMatching(resource spec.Resource, match func(spec.Field) bool) *spec.Field {
 	for i := range resource.Fields {
 		if match(resource.Fields[i]) {
-			field := resource.Fields[i]
-			return &field
+			return new(resource.Fields[i])
 		}
 	}
 	return nil
@@ -589,7 +594,7 @@ func ({{.Resource.Name}}) TableName() string { return {{quote .Resource.Table}} 
 func (value *{{.Resource.Name}}) AfterFind(_ *gorm.DB) error {
 	value.CreatedAt = value.CreatedAt.UTC()
 	value.UpdatedAt = value.UpdatedAt.UTC()
-{{range timeFields .Resource}}{{if .Nullable}}	if value.{{.GoName}} != nil { normalized := value.{{.GoName}}.UTC(); value.{{.GoName}} = &normalized }
+{{range timeFields .Resource}}{{if .Nullable}}	if value.{{.GoName}} != nil { value.{{.GoName}} = new(value.{{.GoName}}.UTC()) }
 {{else}}	value.{{.GoName}} = value.{{.GoName}}.UTC()
 {{end}}{{end}}	return nil
 }
@@ -677,6 +682,7 @@ package {{.Resource.Package}}
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -699,29 +705,32 @@ type store struct {
 }
 
 func (s store) list(ctx context.Context, filters filters) ([]{{.Resource.Name}}, int64, error) {
-	db := s.db.WithContext(ctx).Model(&{{.Resource.Name}}{})
+	var items []{{.Resource.Name}}
+	var total int64
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		db := tx.Model(&{{.Resource.Name}}{})
 {{if searchColumns .Resource}}	if filters.query != "" {
-		pattern := "%" + strings.ToLower(filters.query) + "%"
-		db = db.Where({{quote (searchSQL .Resource)}}{{range searchColumns .Resource}}, pattern{{end}})
+			pattern := "%" + strings.ToLower(filters.query) + "%"
+			db = db.Where({{quote (searchSQL .Resource)}}{{range searchColumns .Resource}}, pattern{{end}})
 	}
 {{end}}{{range filterFields .Resource}}	if value, ok := filters.exact[{{quote .Name}}]; ok {
 		db = db.Where(clause.Eq{Column: gormgen.{{$.Resource.Name}}.{{.GoName}}.Column(), Value: value})
 	}
-{{end}}	var total int64
-	if err := db.Count(&total).Error; err != nil { return nil, 0, err }
-	orders := []clause.OrderByColumn{gormgen.{{.Resource.Name}}.CreatedAt.Desc(), gormgen.{{.Resource.Name}}.ID.Desc()}
+	{{end}}
+		if err := db.Count(&total).Error; err != nil { return err }
+		orders := []clause.OrderByColumn{gormgen.{{.Resource.Name}}.CreatedAt.Desc(), gormgen.{{.Resource.Name}}.ID.Desc()}
 	switch filters.sort {
 	case "id": orders = []clause.OrderByColumn{gormgen.{{.Resource.Name}}.ID.Asc()}
 	case "-id": orders = []clause.OrderByColumn{gormgen.{{.Resource.Name}}.ID.Desc()}
 	case "created_at": orders = []clause.OrderByColumn{gormgen.{{.Resource.Name}}.CreatedAt.Asc()}
 	case "-created_at": orders = []clause.OrderByColumn{gormgen.{{.Resource.Name}}.CreatedAt.Desc()}
 {{range sortableFields .Resource}}	case {{quote .Name}}: orders = []clause.OrderByColumn{gormgen.{{$.Resource.Name}}.{{.GoName}}.Asc()}
-	case {{quote (printf "-%s" .Name)}}: orders = []clause.OrderByColumn{gormgen.{{$.Resource.Name}}.{{.GoName}}.Desc()}
+		case {{quote (printf "-%s" .Name)}}: orders = []clause.OrderByColumn{gormgen.{{$.Resource.Name}}.{{.GoName}}.Desc()}
 {{end}}	}
-	for _, order := range orders { db = db.Order(order) }
-	var items []{{.Resource.Name}}
-	err := db.Offset((filters.page-1)*filters.pageSize).Limit(filters.pageSize).Find(&items).Error
-	return items, total, err
+		for _, order := range orders { db = db.Order(order) }
+		return db.Offset((filters.page-1)*filters.pageSize).Limit(filters.pageSize).Find(&items).Error
+	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+		return items, total, err
 }
 
 func (s store) get(ctx context.Context, id int64) ({{.Resource.Name}}, error) {
@@ -749,10 +758,17 @@ func (s store) create(ctx context.Context, values map[string]any) ({{.Resource.N
 }
 
 func (s store) update(ctx context.Context, id int64, values map[string]any) ({{.Resource.Name}}, error) {
-	result := s.db.WithContext(ctx).Model(new({{.Resource.Name}})).Where("id = ?", id).Updates(values)
-	if result.Error != nil { return {{.Resource.Name}}{}, translateDatabaseError(s.db, result.Error) }
-	if result.RowsAffected == 0 { return {{.Resource.Name}}{}, gorm.ErrRecordNotFound }
-	return s.get(ctx, id)
+	var updated {{.Resource.Name}}
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(new({{.Resource.Name}})).Where("id = ?", id).Updates(values)
+		if result.Error != nil { return translateDatabaseError(tx, result.Error) }
+		if result.RowsAffected == 0 { return gorm.ErrRecordNotFound }
+		item, err := (store{db: tx}).get(ctx, id)
+		if err != nil { return err }
+		updated = item
+		return nil
+	})
+	return updated, err
 }
 
 func (s store) delete(ctx context.Context, id int64) error {

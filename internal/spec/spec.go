@@ -530,6 +530,8 @@ func toGoName(name string) string {
 			parts[i] = "API"
 		case "url":
 			parts[i] = "URL"
+		case "urls":
+			parts[i] = "URLs"
 		case "uuid":
 			parts[i] = "UUID"
 		case "json":

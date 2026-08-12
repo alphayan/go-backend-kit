@@ -39,8 +39,7 @@ func FromDatabase(err error) error {
 }
 
 func Public(err error) *Error {
-	var public *Error
-	if errors.As(err, &public) {
+	if public, ok := errors.AsType[*Error](err); ok {
 		return public
 	}
 	return &Error{Status: http.StatusInternalServerError, Code: "internal_error", Message: "internal server error"}

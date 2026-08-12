@@ -3,6 +3,7 @@ package validation
 import (
 	"fmt"
 	"math"
+	"slices"
 
 	"github.com/shopspring/decimal"
 )
@@ -26,10 +27,8 @@ func MaxLength(details Details, name, value string, limit int) {
 }
 
 func OneOf(details Details, name, value string, allowed []string) {
-	for _, candidate := range allowed {
-		if value == candidate {
-			return
-		}
+	if slices.Contains(allowed, value) {
+		return
 	}
 	details[name] = "must be one of the allowed values"
 }

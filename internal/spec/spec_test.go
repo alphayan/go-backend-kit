@@ -44,6 +44,23 @@ func TestParseValidResource(t *testing.T) {
 	}
 }
 
+func TestParseUsesGoInitialisms(t *testing.T) {
+	resource, err := spec.Parse([]byte(`schema_version: 1
+name: Research
+table: research
+route: /research
+fields:
+  - name: source_urls
+    type: string
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := resource.Fields[0].GoName, "SourceURLs"; got != want {
+		t.Fatalf("GoName = %q, want %q", got, want)
+	}
+}
+
 func TestParseSupportsEveryFieldType(t *testing.T) {
 	types := []string{"string", "text", "bool", "int32", "int64", "float64", "decimal", "time", "uuid", "json"}
 	for _, fieldType := range types {

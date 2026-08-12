@@ -102,6 +102,17 @@ func TestNewAddGenerateAndCheck(t *testing.T) {
 			t.Errorf("generated file %s: %v", name, err)
 		}
 	}
+	mainData, err := os.ReadFile(filepath.Join(root, "cmd", "api", "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainSource := string(mainData)
+	signalIndex := strings.Index(mainSource, "signal.Notify(signals")
+	databaseIndex := strings.Index(mainSource, "database.Open(")
+	serverIndex := strings.Index(mainSource, "go func()")
+	if signalIndex < 0 || databaseIndex < 0 || serverIndex < 0 || signalIndex > databaseIndex || signalIndex > serverIndex {
+		t.Fatalf("generated server registers signals after startup work:\n%s", mainSource)
+	}
 	obsoleteFiles := []string{
 		"internal/resources/task/repository_gen.go",
 		"internal/resources/task/service_gen.go",

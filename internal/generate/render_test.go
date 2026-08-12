@@ -59,3 +59,82 @@ fields:
 		})
 	}
 }
+
+func TestModelImportsGroupStandardAndThirdParty(t *testing.T) {
+	resource := spec.Resource{Fields: []spec.Field{
+		{Type: spec.TypeUUID},
+		{Type: spec.TypeDecimal},
+		{Type: spec.TypeJSON},
+	}}
+	want := `"time"
+
+"github.com/google/uuid"
+"github.com/shopspring/decimal"
+"gorm.io/datatypes"
+"gorm.io/gorm"`
+	if got := modelImports(resource); got != want {
+		t.Fatalf("modelImports() = %q, want %q", got, want)
+	}
+}
+
+func TestModelUsesNewExprForNullableTimeFields(t *testing.T) {
+	resource, err := spec.Parse([]byte(`schema_version: 1
+name: Event
+table: events
+route: /events
+fields:
+  - name: observed_at
+    type: time
+    nullable: true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rendered, err := executeGoTemplate("model_gen.go", modelTemplate, resourceData{
+		Module:   "example.com/project",
+		Resource: resource,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "value.ObservedAt = new(value.ObservedAt.UTC())"; !strings.Contains(string(rendered), want) {
+		t.Fatalf("generated model does not contain %q:\n%s", want, rendered)
+	}
+}
+
+func TestStoreUsesConsistentReadSnapshotAndAtomicUpdate(t *testing.T) {
+	resource, err := spec.Parse([]byte(`schema_version: 1
+name: Task
+table: tasks
+route: /tasks
+fields:
+  - name: title
+    type: string
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rendered, err := executeGoTemplate("store_gen.go", storeTemplate, resourceData{
+		Module:   "example.com/project",
+		Resource: resource,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(rendered)
+	for _, want := range []string{
+		`"database/sql"`,
+		`&sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}`,
+		`item, err := (store{db: tx}).get(ctx, id)`,
+		`updated = item`,
+	} {
+		if !strings.Contains(source, want) {
+			t.Errorf("generated store does not contain %q:\n%s", want, source)
+		}
+	}
+	if strings.Contains(source, "return s.get(ctx, id)") {
+		t.Errorf("generated update reads outside its transaction:\n%s", source)
+	}
+}
