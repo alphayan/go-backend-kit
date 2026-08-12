@@ -2,3 +2,5 @@
 /coverage.out
 /.gobackend/
 /.worktrees/
+coverage_results/
+.build-cache/
