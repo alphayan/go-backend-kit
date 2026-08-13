@@ -1,0 +1,34 @@
+package httpx
+
+import (
+	"net/http"
+	"strings"
+
+	"{{.Module}}/internal/platform/apperror"
+	"github.com/labstack/echo/v5"
+)
+
+func WriteData[T any](c *echo.Context, status int, data T) error {
+	return c.JSON(status, Data[T]{Data: data})
+}
+
+func WriteError(c *echo.Context, err error) error {
+	public := apperror.Public(err)
+	if status := echo.StatusCode(err); status != 0 {
+		message := http.StatusText(status)
+		code := strings.ToLower(strings.ReplaceAll(message, " ", "_"))
+		if code == "" {
+			code = "http_error"
+			message = "request failed"
+		}
+		public = &apperror.Error{Status: status, Code: code, Message: message}
+	}
+	if public.Status == http.StatusUnauthorized {
+		c.Response().Header().Set("WWW-Authenticate", "Bearer")
+	}
+	requestID := c.Response().Header().Get("X-Request-ID")
+	if requestID == "" {
+		requestID = c.Request().Header.Get("X-Request-ID")
+	}
+	return c.JSON(public.Status, errorBody{Error: errorData{Code: public.Code, Message: public.Message, Details: public.Details, RequestID: requestID}})
+}

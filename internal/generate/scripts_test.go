@@ -14,20 +14,54 @@ import (
 
 const fakeContainerID = "fake-container-id"
 
-func TestTemporaryPostgresCleanupRemovesAnonymousVolumes(t *testing.T) {
-	t.Run("root PostgreSQL E2E failure", func(t *testing.T) {
-		kitRoot, err := filepath.Abs(filepath.Join("..", ".."))
+func TestNATSHealthChecksUseHealthzNotHelp(t *testing.T) {
+	kitRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e2e, err := os.ReadFile(filepath.Join(kitRoot, "scripts", "nats-e2e.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(e2e)
+	if strings.Contains(text, "nats-server --help") {
+		t.Fatal("nats-e2e.sh uses nats-server --help as a readiness fallback")
+	}
+	if !strings.Contains(text, "http://127.0.0.1:8222/healthz") {
+		t.Fatal("nats-e2e.sh does not wait on 127.0.0.1:8222/healthz")
+	}
+
+	root := filepath.Join(t.TempDir(), "api")
+	generator := generate.Generator{Version: "v0.1.0", DevelopmentReplace: kitRoot}
+	opts := generate.DefaultProjectOptions()
+	opts.Messaging = generate.MessagingNATS
+	if err := generator.New(t.Context(), root, "example.com/api", opts); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{"docker-compose.yml", ".github/workflows/ci.yml"} {
+		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
 		if err != nil {
 			t.Fatal(err)
 		}
-		tools, log := fakeScriptTools(t, "#!/bin/sh\nexit 23\n")
-		command := exec.Command("sh", filepath.Join(kitRoot, "scripts", "postgres-e2e.sh"))
-		command.Dir = kitRoot
-		command.Env = scriptTestEnv(tools, log)
-		if output, err := command.CombinedOutput(); err == nil {
-			t.Fatalf("postgres-e2e.sh unexpectedly succeeded:\n%s", output)
+		body := string(data)
+		if strings.Contains(body, "nats-server --help") {
+			t.Errorf("%s uses nats-server --help as a health check:\n%s", rel, body)
 		}
-		assertExactContainerCleanup(t, log)
+		if !strings.Contains(body, "127.0.0.1:8222/healthz") {
+			t.Errorf("%s does not check 127.0.0.1:8222/healthz:\n%s", rel, body)
+		}
+	}
+}
+
+func TestTemporaryPostgresCleanupRemovesAnonymousVolumes(t *testing.T) {
+	t.Run("root PostgreSQL E2E failure", func(t *testing.T) {
+		assertRootScriptCleansContainer(t, "postgres-e2e.sh")
+	})
+	t.Run("root Redis E2E failure", func(t *testing.T) {
+		assertRootScriptCleansContainer(t, "redis-e2e.sh")
+	})
+	t.Run("root NATS E2E failure", func(t *testing.T) {
+		assertRootScriptCleansContainer(t, "nats-e2e.sh")
 	})
 
 	t.Run("generated Atlas success", func(t *testing.T) {
@@ -37,7 +71,7 @@ func TestTemporaryPostgresCleanupRemovesAnonymousVolumes(t *testing.T) {
 			t.Fatal(err)
 		}
 		generator := generate.Generator{Version: "v0.1.0", DevelopmentReplace: kitRoot}
-		if err := generator.New(t.Context(), root, "example.com/api"); err != nil {
+		if err := generator.New(t.Context(), root, "example.com/api", generate.LegacyProjectOptions()); err != nil {
 			t.Fatal(err)
 		}
 		tools, log := fakeScriptTools(t, "#!/bin/sh\nprintf '%s\\n' 'CREATE TABLE example (id bigint);'\n")
@@ -66,6 +100,12 @@ func TestTemporaryPostgresCleanupRequiresSuccessfulCreation(t *testing.T) {
 		}
 		assertNoContainerCleanup(t, log)
 	})
+	t.Run("root Redis Docker creation failure", func(t *testing.T) {
+		assertRootScriptSkipsCleanupWhenRunFails(t, "redis-e2e.sh")
+	})
+	t.Run("root NATS Docker creation failure", func(t *testing.T) {
+		assertRootScriptSkipsCleanupWhenRunFails(t, "nats-e2e.sh")
+	})
 
 	t.Run("generated Atlas pre-creation failure", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "api")
@@ -74,7 +114,7 @@ func TestTemporaryPostgresCleanupRequiresSuccessfulCreation(t *testing.T) {
 			t.Fatal(err)
 		}
 		generator := generate.Generator{Version: "v0.1.0", DevelopmentReplace: kitRoot}
-		if err := generator.New(t.Context(), root, "example.com/api"); err != nil {
+		if err := generator.New(t.Context(), root, "example.com/api", generate.LegacyProjectOptions()); err != nil {
 			t.Fatal(err)
 		}
 		tools, log := fakeScriptTools(t, "#!/bin/sh\nexit 23\n")
@@ -94,7 +134,7 @@ func TestTemporaryPostgresCleanupRequiresSuccessfulCreation(t *testing.T) {
 			t.Fatal(err)
 		}
 		generator := generate.Generator{Version: "v0.1.0", DevelopmentReplace: kitRoot}
-		if err := generator.New(t.Context(), root, "example.com/api"); err != nil {
+		if err := generator.New(t.Context(), root, "example.com/api", generate.LegacyProjectOptions()); err != nil {
 			t.Fatal(err)
 		}
 		tools, log := fakeScriptTools(t, "#!/bin/sh\nexit 0\n")
@@ -106,6 +146,38 @@ func TestTemporaryPostgresCleanupRequiresSuccessfulCreation(t *testing.T) {
 		}
 		assertNoContainerCleanup(t, log)
 	})
+}
+
+func assertRootScriptCleansContainer(t *testing.T, name string) {
+	t.Helper()
+	kitRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, log := fakeScriptTools(t, "#!/bin/sh\nexit 23\n")
+	command := exec.Command("sh", filepath.Join(kitRoot, "scripts", name))
+	command.Dir = kitRoot
+	command.Env = scriptTestEnv(tools, log)
+	if output, err := command.CombinedOutput(); err == nil {
+		t.Fatalf("%s unexpectedly succeeded:\n%s", name, output)
+	}
+	assertExactContainerCleanup(t, log)
+}
+
+func assertRootScriptSkipsCleanupWhenRunFails(t *testing.T, name string) {
+	t.Helper()
+	kitRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, log := fakeScriptTools(t, "#!/bin/sh\nexit 0\n")
+	command := exec.Command("sh", filepath.Join(kitRoot, "scripts", name))
+	command.Dir = kitRoot
+	command.Env = append(scriptTestEnv(tools, log), "FAKE_DOCKER_RUN_FAIL=1")
+	if output, err := command.CombinedOutput(); err == nil {
+		t.Fatalf("%s unexpectedly succeeded:\n%s", name, output)
+	}
+	assertNoContainerCleanup(t, log)
 }
 
 func fakeScriptTools(t *testing.T, goScript string) (string, string) {
@@ -143,6 +215,8 @@ func scriptTestEnv(tools, log string) []string {
 		if strings.HasPrefix(value, "PATH=") ||
 			strings.HasPrefix(value, "DATABASE_URL=") ||
 			strings.HasPrefix(value, "ATLAS_DATABASE_URL=") ||
+			strings.HasPrefix(value, "TEST_REDIS_URL=") ||
+			strings.HasPrefix(value, "TEST_NATS_URL=") ||
 			strings.HasPrefix(value, "FAKE_DOCKER_RUN_FAIL=") ||
 			strings.HasPrefix(value, "FAKE_DOCKER_LOG=") {
 			continue
@@ -153,6 +227,8 @@ func scriptTestEnv(tools, log string) []string {
 		"PATH="+tools+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"DATABASE_URL=",
 		"ATLAS_DATABASE_URL=",
+		"TEST_REDIS_URL=",
+		"TEST_NATS_URL=",
 		"FAKE_DOCKER_LOG="+log,
 	)
 }

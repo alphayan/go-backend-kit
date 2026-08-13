@@ -1,0 +1,134 @@
+package app
+
+import (
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"{{.Module}}/internal/platform/config"
+{{if .Options.HasJWT}}	"encoding/base64"
+	"strings"
+
+	"{{.Module}}/internal/platform/auth"
+	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
+{{end}}{{if .Options.HasRedis}}	"github.com/redis/go-redis/v9"
+{{end}}{{if .Options.HasNATS}}	"github.com/nats-io/nats.go"
+{{end}}	"github.com/libtnb/sqlite"
+	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
+)
+
+func TestHealthDocsAndHTTPErrorEnvelope(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: gormlogger.Default.LogMode(gormlogger.Silent)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	cfg := config.Config{RequestTimeout: 15 * time.Second}
+{{if .Options.HasJWT}}	secret := bytes32(t)
+	verifier, err := auth.NewVerifier(secret, "test-issuer", "test-audience", 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+{{end}}{{if .Options.HasRedis}}	var redisClient *redis.Client
+{{end}}{{if .Options.HasNATS}}	var natsConn *nats.Conn
+{{end}}	e := New(cfg, db, logger{{if .Options.HasJWT}}, verifier{{end}}{{if .Options.HasRedis}}, redisClient{{end}}{{if .Options.HasNATS}}, natsConn{{end}})
+
+	live := request(e, "/health/live", nil)
+	if live.Code != http.StatusOK {
+		t.Fatalf("live status = %d, body = %s", live.Code, live.Body.String())
+	}
+	if live.Header().Get("X-Request-ID") == "" || live.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("middleware headers = %#v", live.Header())
+	}
+	if response := request(e, "/openapi.json", nil); response.Code != http.StatusOK {
+		t.Fatalf("openapi status = %d", response.Code)
+	}
+	if response := request(e, "/docs", nil); response.Code != http.StatusOK {
+		t.Fatalf("docs status = %d", response.Code)
+	}
+
+	missing := request(e, "/missing", nil)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing status = %d, body = %s", missing.Code, missing.Body.String())
+	}
+	var envelope struct {
+		Error struct {
+			Code      string `json:"code"`
+			RequestID string `json:"request_id"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(missing.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Error.Code != "not_found" || envelope.Error.RequestID == "" {
+		t.Fatalf("error envelope = %#v", envelope)
+	}
+{{if .Options.HasJWT}}
+	unauth := request(e, "/api/v1/missing", nil)
+	if unauth.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated api status = %d, body = %s", unauth.Code, unauth.Body.String())
+	}
+	if unauth.Header().Get("WWW-Authenticate") != "Bearer" {
+		t.Fatalf("WWW-Authenticate = %q", unauth.Header().Get("WWW-Authenticate"))
+	}
+	if strings.Contains(unauth.Body.String(), string(secret)) || strings.Contains(unauth.Body.String(), base64.StdEncoding.EncodeToString(secret)) {
+		t.Fatal("401 body leaked jwt secret")
+	}
+	for _, header := range []string{"Bearer", "Basic abc", "bearer token"} {
+		malformed := request(e, "/api/v1/missing", map[string]string{"Authorization": header})
+		if malformed.Code != http.StatusUnauthorized {
+			t.Fatalf("malformed %q status = %d, body = %s", header, malformed.Code, malformed.Body.String())
+		}
+	}
+	token := mustSignJWT(t, secret, "test-issuer", "test-audience", "user-1", time.Now().Add(time.Minute))
+	authed := request(e, "/api/v1/missing", map[string]string{"Authorization": "Bearer " + token})
+	if authed.Code != http.StatusNotFound {
+		t.Fatalf("authenticated missing route status = %d, body = %s", authed.Code, authed.Body.String())
+	}
+{{end}}
+}
+
+func request(handler http.Handler, path string, headers map[string]string) *httptest.ResponseRecorder {
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	handler.ServeHTTP(recorder, req)
+	return recorder
+}
+{{if .Options.HasJWT}}
+func bytes32(t *testing.T) []byte {
+	t.Helper()
+	secret := make([]byte, 32)
+	for i := range secret {
+		secret[i] = byte(i + 1)
+	}
+	return secret
+}
+
+func mustSignJWT(t *testing.T, secret []byte, issuer, audience, subject string, exp time.Time) string {
+	t.Helper()
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.HS256, Key: secret}, (&jose.SignerOptions{}).WithType("JWT"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := jwt.Signed(signer).Claims(jwt.Claims{
+		Issuer:   issuer,
+		Subject:  subject,
+		Audience: jwt.Audience{audience},
+		Expiry:   jwt.NewNumericDate(exp),
+		IssuedAt: jwt.NewNumericDate(time.Now()),
+	}).Serialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+{{end}}

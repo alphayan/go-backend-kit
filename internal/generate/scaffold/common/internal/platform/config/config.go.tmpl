@@ -1,0 +1,223 @@
+package config
+
+import (
+{{if .Options.HasJWT}}	"encoding/base64"
+{{end}}	"errors"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type envLookup func(string) string
+
+type Config struct {
+	Address        string
+	CORSOrigins    []string
+	RequestTimeout time.Duration
+{{if .Options.IsPostgres}}	DatabaseURL                   string
+	DatabaseMaxOpenConnections    int
+	DatabaseMaxIdleConnections    int
+	DatabaseConnectionMaxLifetime time.Duration
+	DatabaseConnectionMaxIdleTime time.Duration
+	DatabaseConnectTimeout        time.Duration
+{{end}}{{if .Options.IsSQLite}}	DatabasePath           string
+	DatabaseConnectTimeout time.Duration
+{{end}}{{if .Options.HasRedis}}	RedisURL            string
+	RedisConnectTimeout time.Duration
+{{end}}{{if .Options.HasNATS}}	NATSURL            string
+	NATSConnectTimeout time.Duration
+	NATSFlushTimeout   time.Duration
+	NATSDrainTimeout   time.Duration
+{{end}}{{if .Options.HasJWT}}	AuthJWTSecret   []byte
+	AuthJWTIssuer   string
+	AuthJWTAudience string
+	AuthJWTLeeway   time.Duration
+{{end}}}
+
+func Load() (Config, error) { return load(os.Getenv) }
+
+func load(getenv envLookup) (Config, error) {
+	cfg := Config{
+		Address:        envOr(getenv, "HTTP_ADDRESS", ":8080"),
+		RequestTimeout: 15 * time.Second,
+	}
+	if raw := strings.TrimSpace(getenv("CORS_ORIGINS")); raw != "" {
+		for origin := range strings.SplitSeq(raw, ",") {
+			if origin = strings.TrimSpace(origin); origin != "" {
+				cfg.CORSOrigins = append(cfg.CORSOrigins, origin)
+			}
+		}
+	}
+{{if .Options.IsPostgres}}	maxOpen, err := intEnv(getenv, "DB_MAX_OPEN_CONNS", 25)
+	if err != nil {
+		return Config{}, err
+	}
+	maxIdle, err := intEnv(getenv, "DB_MAX_IDLE_CONNS", 25)
+	if err != nil {
+		return Config{}, err
+	}
+	maxLifetime, err := durationEnv(getenv, "DB_CONN_MAX_LIFETIME", 30*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	maxIdleTime, err := durationEnv(getenv, "DB_CONN_MAX_IDLE_TIME", 5*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	connectTimeout, err := durationEnv(getenv, "DB_CONNECT_TIMEOUT", 5*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	if maxOpen <= 0 {
+		return Config{}, errors.New("DB_MAX_OPEN_CONNS must be greater than zero")
+	}
+	if maxIdle < 0 {
+		return Config{}, errors.New("DB_MAX_IDLE_CONNS cannot be negative")
+	}
+	if maxIdle > maxOpen {
+		return Config{}, errors.New("DB_MAX_IDLE_CONNS cannot exceed DB_MAX_OPEN_CONNS")
+	}
+	if maxLifetime < 0 {
+		return Config{}, errors.New("DB_CONN_MAX_LIFETIME cannot be negative")
+	}
+	if maxIdleTime < 0 {
+		return Config{}, errors.New("DB_CONN_MAX_IDLE_TIME cannot be negative")
+	}
+	if connectTimeout <= 0 {
+		return Config{}, errors.New("DB_CONNECT_TIMEOUT must be greater than zero")
+	}
+	cfg.DatabaseURL = getenv("DATABASE_URL")
+	cfg.DatabaseMaxOpenConnections = maxOpen
+	cfg.DatabaseMaxIdleConnections = maxIdle
+	cfg.DatabaseConnectionMaxLifetime = maxLifetime
+	cfg.DatabaseConnectionMaxIdleTime = maxIdleTime
+	cfg.DatabaseConnectTimeout = connectTimeout
+	if cfg.DatabaseURL == "" {
+		return Config{}, errors.New("DATABASE_URL is required")
+	}
+{{end}}{{if .Options.IsSQLite}}	connectTimeout, err := durationEnv(getenv, "DB_CONNECT_TIMEOUT", 5*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	if connectTimeout <= 0 {
+		return Config{}, errors.New("DB_CONNECT_TIMEOUT must be greater than zero")
+	}
+	cfg.DatabasePath = envOr(getenv, "DATABASE_PATH", "data/app.db")
+	cfg.DatabaseConnectTimeout = connectTimeout
+	if strings.TrimSpace(cfg.DatabasePath) == "" {
+		return Config{}, errors.New("DATABASE_PATH is required")
+	}
+{{end}}{{if .Options.HasRedis}}	redisTimeout, err := durationEnv(getenv, "REDIS_CONNECT_TIMEOUT", 5*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	if redisTimeout <= 0 {
+		return Config{}, errors.New("REDIS_CONNECT_TIMEOUT must be greater than zero")
+	}
+	cfg.RedisURL = getenv("REDIS_URL")
+	cfg.RedisConnectTimeout = redisTimeout
+	if cfg.RedisURL == "" {
+		return Config{}, errors.New("REDIS_URL is required")
+	}
+{{end}}{{if .Options.HasNATS}}	natsConnect, err := durationEnv(getenv, "NATS_CONNECT_TIMEOUT", 5*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	natsFlush, err := durationEnv(getenv, "NATS_FLUSH_TIMEOUT", 2*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	natsDrain, err := durationEnv(getenv, "NATS_DRAIN_TIMEOUT", 5*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	if natsConnect <= 0 {
+		return Config{}, errors.New("NATS_CONNECT_TIMEOUT must be greater than zero")
+	}
+	if natsFlush <= 0 {
+		return Config{}, errors.New("NATS_FLUSH_TIMEOUT must be greater than zero")
+	}
+	if natsDrain <= 0 {
+		return Config{}, errors.New("NATS_DRAIN_TIMEOUT must be greater than zero")
+	}
+	cfg.NATSURL = getenv("NATS_URL")
+	cfg.NATSConnectTimeout = natsConnect
+	cfg.NATSFlushTimeout = natsFlush
+	cfg.NATSDrainTimeout = natsDrain
+	if cfg.NATSURL == "" {
+		return Config{}, errors.New("NATS_URL is required")
+	}
+{{end}}{{if .Options.HasJWT}}	secret, err := decodeJWTSecret(getenv("AUTH_JWT_SECRET_B64"))
+	if err != nil {
+		return Config{}, err
+	}
+	leeway, err := durationEnv(getenv, "AUTH_JWT_LEEWAY", 30*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	if leeway < 0 {
+		return Config{}, errors.New("AUTH_JWT_LEEWAY cannot be negative")
+	}
+	if leeway > 2*time.Minute {
+		return Config{}, errors.New("AUTH_JWT_LEEWAY must be at most 2m")
+	}
+	cfg.AuthJWTSecret = secret
+	cfg.AuthJWTIssuer = strings.TrimSpace(getenv("AUTH_JWT_ISSUER"))
+	cfg.AuthJWTAudience = strings.TrimSpace(getenv("AUTH_JWT_AUDIENCE"))
+	cfg.AuthJWTLeeway = leeway
+	if cfg.AuthJWTIssuer == "" {
+		return Config{}, errors.New("AUTH_JWT_ISSUER is required")
+	}
+	if cfg.AuthJWTAudience == "" {
+		return Config{}, errors.New("AUTH_JWT_AUDIENCE is required")
+	}
+{{end}}	return cfg, nil
+}
+
+func intEnv(getenv envLookup, name string, fallback int) (int, error) {
+	raw := strings.TrimSpace(getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, errors.New(name + " must be an integer")
+	}
+	return value, nil
+}
+
+func durationEnv(getenv envLookup, name string, fallback time.Duration) (time.Duration, error) {
+	raw := strings.TrimSpace(getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, errors.New(name + " must be a Go duration")
+	}
+	return value, nil
+}
+
+func envOr(getenv envLookup, name, fallback string) string {
+	if value := getenv(name); value != "" {
+		return value
+	}
+	return fallback
+}
+{{if .Options.HasJWT}}
+func decodeJWTSecret(raw string) ([]byte, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, errors.New("AUTH_JWT_SECRET_B64 is required")
+	}
+	secret, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, errors.New("AUTH_JWT_SECRET_B64 must be standard base64")
+	}
+	if len(secret) < 32 {
+		return nil, errors.New("AUTH_JWT_SECRET_B64 must decode to at least 32 bytes")
+	}
+	return secret, nil
+}
+{{end}}

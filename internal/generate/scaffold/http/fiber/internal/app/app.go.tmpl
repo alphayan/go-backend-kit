@@ -1,0 +1,132 @@
+package app
+
+import (
+	"context"
+	"log/slog"
+	"net/http"
+	"time"
+{{if .Options.HasJWT}}	"strings"
+{{end}}
+
+	"{{.Module}}/internal/generated"
+	"{{.Module}}/internal/platform/config"
+	"{{.Module}}/internal/platform/httpx"
+	"{{.Module}}/openapi"
+{{if .Options.HasJWT}}	"{{.Module}}/internal/platform/apperror"
+	"{{.Module}}/internal/platform/auth"
+{{end}}{{if .Options.HasRedis}}	"github.com/redis/go-redis/v9"
+{{end}}{{if .Options.HasNATS}}	"github.com/nats-io/nats.go"
+{{end}}	"github.com/gofiber/fiber/v3"
+	"github.com/gofiber/fiber/v3/middleware/adaptor"
+	"github.com/gofiber/fiber/v3/middleware/cors"
+	"github.com/gofiber/fiber/v3/middleware/helmet"
+	"github.com/gofiber/fiber/v3/middleware/recover"
+	"github.com/gofiber/fiber/v3/middleware/requestid"
+	"github.com/swaggest/swgui/v5emb"
+	"gorm.io/gorm"
+)
+
+func New(cfg config.Config, db *gorm.DB, logger *slog.Logger{{if .Options.HasJWT}}, verifier *auth.Verifier{{end}}{{if .Options.HasRedis}}, redisClient *redis.Client{{end}}{{if .Options.HasNATS}}, natsConn *nats.Conn{{end}}) *fiber.App {
+	app := fiber.New(fiber.Config{
+		BodyLimit:    1 << 20,
+		ReadTimeout:  20 * time.Second,
+		WriteTimeout: 20 * time.Second,
+		IdleTimeout:  60 * time.Second,
+		ErrorHandler: func(c fiber.Ctx, err error) error {
+			return httpx.WriteError(c, err)
+		},
+	})
+	app.Use(requestid.New())
+	app.Use(recover.New())
+	app.Use(helmet.New())
+	app.Use(func(c fiber.Ctx) error {
+		ctx, cancel := context.WithTimeout(c.Context(), cfg.RequestTimeout)
+		defer cancel()
+		c.SetContext(ctx)
+		return c.Next()
+	})
+	if len(cfg.CORSOrigins) > 0 {
+		app.Use(cors.New(cors.Config{AllowOrigins: cfg.CORSOrigins}))
+	}
+	app.Use(requestLogger(logger))
+
+	app.Get("/health/live", func(c fiber.Ctx) error {
+		return httpx.WriteData(c, http.StatusOK, map[string]string{"status": "ok"})
+	})
+	app.Get("/health/ready", func(c fiber.Ctx) error {
+		ctx := c.Context()
+		sqlDB, err := db.DB()
+		if err != nil || sqlDB.PingContext(ctx) != nil {
+			return httpx.WriteError(c, fiber.NewError(http.StatusServiceUnavailable))
+		}
+{{if .Options.HasRedis}}		if err := redisClient.Ping(ctx).Err(); err != nil {
+			return httpx.WriteError(c, fiber.NewError(http.StatusServiceUnavailable))
+		}
+{{end}}{{if .Options.HasNATS}}		if err := ctx.Err(); err != nil {
+			return httpx.WriteError(c, fiber.NewError(http.StatusServiceUnavailable))
+		}
+		timeout := 2 * time.Second
+		if deadline, ok := ctx.Deadline(); ok {
+			if remaining := time.Until(deadline); remaining < timeout {
+				timeout = remaining
+			}
+		}
+		if timeout <= 0 || natsConn.FlushTimeout(timeout) != nil {
+			return httpx.WriteError(c, fiber.NewError(http.StatusServiceUnavailable))
+		}
+{{end}}		return httpx.WriteData(c, http.StatusOK, map[string]string{"status": "ready"})
+	})
+	app.Get("/openapi.json", func(c fiber.Ctx) error {
+		return c.Status(http.StatusOK).Type("json").Send(openapi.Spec)
+	})
+	docs := adaptor.HTTPHandler(v5emb.New("Generated Backend API", "/openapi.json", "/docs"))
+	app.Get("/docs", docs)
+	app.Get("/docs/*", docs)
+	api := app.Group("/api/v1")
+{{if .Options.HasJWT}}	api.Use(jwtMiddleware(verifier))
+{{end}}	generated.Register(api, db)
+	return app
+}
+
+func requestLogger(logger *slog.Logger) fiber.Handler {
+	return func(c fiber.Ctx) error {
+		start := time.Now()
+		err := c.Next()
+		logger.LogAttrs(c.Context(), slog.LevelInfo, "http_request",
+			slog.String("method", c.Method()),
+			slog.String("path", c.Path()),
+			slog.Int("status", c.Response().StatusCode()),
+			slog.String("request_id", requestid.FromContext(c)),
+			slog.Int64("duration_ms", time.Since(start).Milliseconds()),
+		)
+		return err
+	}
+}
+{{if .Options.HasJWT}}
+func jwtMiddleware(verifier *auth.Verifier) fiber.Handler {
+	return func(c fiber.Ctx) error {
+		token, ok := bearerToken(c.Get("Authorization"))
+		if !ok {
+			return httpx.WriteError(c, apperror.Unauthorized())
+		}
+		identity, err := verifier.Verify(token)
+		if err != nil {
+			return httpx.WriteError(c, apperror.Unauthorized())
+		}
+		c.SetContext(auth.WithIdentity(c.Context(), identity))
+		return c.Next()
+	}
+}
+
+func bearerToken(header string) (string, bool) {
+	const prefix = "Bearer "
+	if !strings.HasPrefix(header, prefix) {
+		return "", false
+	}
+	token := strings.TrimSpace(strings.TrimPrefix(header, prefix))
+	if token == "" || strings.ContainsAny(token, " \t") {
+		return "", false
+	}
+	return token, true
+}
+{{end}}

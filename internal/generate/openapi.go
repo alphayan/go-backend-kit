@@ -8,7 +8,10 @@ import (
 	"github.com/pb33f/libopenapi"
 )
 
-func buildOpenAPI(resources []spec.Resource) (map[string]any, error) {
+func buildOpenAPI(resources []spec.Resource, opts ProjectOptions) (map[string]any, error) {
+	if err := opts.Validate(); err != nil {
+		return nil, err
+	}
 	if err := validateOpenAPIComponentNames(resources); err != nil {
 		return nil, err
 	}
@@ -30,13 +33,23 @@ func buildOpenAPI(resources []spec.Resource) (map[string]any, error) {
 		collection := "/api/v1" + resource.Route
 		member := collection + "/{id}"
 		paths[collection] = map[string]any{
-			"get":  operation(tag, "List "+resource.Name, nil, 200, pageSchema(resource.Name), listParameters(resource)),
-			"post": operation(tag, "Create "+resource.Name, ref("Create"+resource.Name+"Input"), 201, dataSchema(ref(resource.Name)), nil),
+			"get":  operation(tag, "List "+resource.Name, nil, 200, pageSchema(resource.Name), listParameters(resource), opts),
+			"post": operation(tag, "Create "+resource.Name, ref("Create"+resource.Name+"Input"), 201, dataSchema(ref(resource.Name)), nil, opts),
 		}
 		paths[member] = map[string]any{
-			"get":    operation(tag, "Get "+resource.Name, nil, 200, dataSchema(ref(resource.Name)), idParameters()),
-			"patch":  operation(tag, "Update "+resource.Name, ref("Update"+resource.Name+"Input"), 200, dataSchema(ref(resource.Name)), idParameters()),
-			"delete": operation(tag, "Delete "+resource.Name, nil, 204, nil, idParameters()),
+			"get":    operation(tag, "Get "+resource.Name, nil, 200, dataSchema(ref(resource.Name)), idParameters(), opts),
+			"patch":  operation(tag, "Update "+resource.Name, ref("Update"+resource.Name+"Input"), 200, dataSchema(ref(resource.Name)), idParameters(), opts),
+			"delete": operation(tag, "Delete "+resource.Name, nil, 204, nil, idParameters(), opts),
+		}
+	}
+	components := map[string]any{"schemas": schemas}
+	if opts.HasJWT() {
+		components["securitySchemes"] = map[string]any{
+			"bearerAuth": map[string]any{
+				"type":         "http",
+				"scheme":       "bearer",
+				"bearerFormat": "JWT",
+			},
 		}
 	}
 	return map[string]any{
@@ -45,7 +58,7 @@ func buildOpenAPI(resources []spec.Resource) (map[string]any, error) {
 		"info":           map[string]any{"title": "Generated Backend API", "version": "0.1.0"},
 		"servers":        []any{map[string]any{"url": "/"}},
 		"paths":          paths,
-		"components":     map[string]any{"schemas": schemas},
+		"components":     components,
 	}, nil
 }
 
@@ -158,7 +171,7 @@ func fieldSchema(field spec.Field) map[string]any {
 	return value
 }
 
-func operation(tag, summary string, body map[string]any, status int, responseSchema map[string]any, parameters []any) map[string]any {
+func operation(tag, summary string, body map[string]any, status int, responseSchema map[string]any, parameters []any, opts ProjectOptions) map[string]any {
 	value := map[string]any{"tags": []string{tag}, "summary": summary, "responses": map[string]any{}}
 	if len(parameters) > 0 {
 		value["parameters"] = parameters
@@ -166,13 +179,20 @@ func operation(tag, summary string, body map[string]any, status int, responseSch
 	if body != nil {
 		value["requestBody"] = map[string]any{"required": true, "content": map[string]any{"application/json": map[string]any{"schema": body}}}
 	}
+	if opts.HasJWT() {
+		value["security"] = []any{map[string]any{"bearerAuth": []any{}}}
+	}
 	responses := value["responses"].(map[string]any)
 	response := map[string]any{"description": fmt.Sprintf("HTTP %d", status)}
 	if responseSchema != nil {
 		response["content"] = map[string]any{"application/json": map[string]any{"schema": responseSchema}}
 	}
 	responses[fmt.Sprint(status)] = response
-	for _, code := range []string{"400", "404", "409", "422", "500"} {
+	codes := []string{"400", "404", "409", "422", "500"}
+	if opts.HasJWT() {
+		codes = append([]string{"401"}, codes...)
+	}
+	for _, code := range codes {
 		responses[code] = map[string]any{"description": "Error", "content": map[string]any{"application/json": map[string]any{"schema": ref("Error")}}}
 	}
 	return value

@@ -1,0 +1,126 @@
+# {{.Module}}
+
+本项目由 [go-backend-kit](https://github.com/alphayan/go-backend-kit) {{.Version}} 生成。
+
+[English](README.md)
+
+## 环境要求
+
+- Go {{.Pins.GoVersion}} 或更高版本；推荐 toolchain {{.Pins.Toolchain}}
+{{if or .Options.IsPostgres .Options.HasRedis .Options.HasNATS}}- Docker，用于已选择的开发服务和 Atlas 迁移
+{{else}}- 运行应用不需要 Docker。生成 SQL 迁移时仍会使用固定的 Atlas Community 镜像。
+{{end}}
+本项目创建时的选择：
+
+```text
+--http {{.Options.HTTP}} --database {{.Options.Database}} --cache {{.Options.Cache}} --messaging {{.Options.Messaging}} --logging {{.Options.Logging}} --auth {{.Options.Auth}}
+```
+
+选择记录在 `.gobackend-project.json` 中，不能就地修改。若要更换 provider，请创建新项目。
+
+## 添加资源
+
+```bash
+go tool gobackend add path/to/resource.yaml
+go tool gobackend check
+```
+
+`resources/` 中的 YAML 是唯一事实来源。纳入版本管理的 `.gobackend-generated.json` 清单记录生成器实际拥有的每条路径及其 SHA-256 摘要；普通手写 `.go` 文件永不覆盖。陈旧生成文件只有在当前内容仍与清单一致时才会删除；如果被人工修改，生成会安全报错，不会删除该文件。
+
+`go tool gobackend generate` 会保留固定版本的官方 `go tool gorm gen` 工作流，重新生成 store 筛选和排序实际使用的字段辅助。`gormgen/query_gen.go` 只由官方 GORM CLI 生成，gobackend 不重写该输出。
+
+## 数据库与迁移
+{{if .Options.IsSQLite}}
+默认数据库文件是 `data/app.db`（`DATABASE_PATH`）。进程会创建父目录，启用外键、WAL 和 busy timeout，并使用单连接。构建和测试应在 `CGO_ENABLED=0` 下通过。
+
+SQLite 是真实运行时，不只是测试替身。需要 PostgreSQL 并发、锁或原生数值语义的工作负载应使用 `--database postgres` 创建。已有迁移后更换数据库选择不受支持。
+
+```bash
+make migration name=create_products
+make migrate-apply
+```
+{{else}}
+```bash
+docker compose up -d postgres
+make migration name=create_products
+DATABASE_URL='postgres://app:app@localhost:5432/app?sslmode=disable' make migrate-apply
+```
+{{end}}
+迁移命令使用固定的开源 Atlas Community Docker 镜像 `{{.Pins.AtlasImage}}`：先在宿主机运行生成的 GORM Provider，再让 Atlas 使用一次性开发库计算差异。应用数据库不会被当作 Atlas 的 dev 数据库。Community 配置用于版本化迁移生成、应用和直接 schema 比较；高级迁移 lint、回滚、迁移测试、审批策略及高级数据库对象治理不在该配置范围内。应用前请审查 `migrations/` 中的 SQL。生产启动不会调用 `AutoMigrate`。
+{{if .Options.HasRedis}}
+## Redis
+
+Redis 以 `internal/platform/cache` 中的 `*redis.Client` 提供。生成的 CRUD 不会自动缓存。需要缓存的手写代码应定义自己实际使用的小型 `Get`/`Set`/`Delete` 接口。
+
+```bash
+docker compose up -d redis
+```
+
+设置 `REDIS_URL`（见 `.env.example`）。不要提交密钥。Compose 中的 Redis 端口绑定 `127.0.0.1`。
+{{end}}{{if .Options.HasNATS}}
+## NATS
+
+NATS 以 `internal/platform/messaging` 中的 `*nats.Conn` 提供。生成的 CRUD 不会发布事件或创建 JetStream 资源。手写发布/订阅代码应定义自己需要的小接口。
+
+```bash
+docker compose up -d nats
+```
+
+设置 `NATS_URL`（见 `.env.example`）。
+{{end}}{{if .Options.HasJWT}}
+## JWT 校验
+
+`/api/v1` 需要 bearer JWT。以下路由保持公开：`/health/live`、`/health/ready`、`/openapi.json`、`/docs`。
+
+本项目只校验外部签发的 HS256 token，不创建用户、密码、登录、刷新令牌或 RBAC。
+
+生成本地密钥且不要提交到 git：
+
+```bash
+openssl rand -base64 32
+```
+
+将值写入 gitignore 的本地 `.env` 中的 `AUTH_JWT_SECRET_B64`，并设置 `AUTH_JWT_ISSUER` 与 `AUTH_JWT_AUDIENCE`。可选 `AUTH_JWT_LEEWAY` 默认 30s，上限 2m。
+{{end}}
+## 启动
+
+```bash
+cp .env.example .env
+set -a; . ./.env; set +a
+make run
+```
+
+可访问 `/api/v1`、`/health/live`、`/health/ready`、`/openapi.json` 和 `/docs`。
+
+## 验证
+
+```bash
+go tool gobackend check
+{{if .Options.IsSQLite}}CGO_ENABLED=0 go test -race ./...
+{{else}}go test -race ./...
+{{end}}go vet ./...
+go tool govulncheck ./...
+```
+{{if .Options.IsSQLite}}
+SQLite 契约测试使用内存数据库。CI 以 `CGO_ENABLED=0` 运行。
+{{else}}
+CI 会先把已审查迁移应用到 PostgreSQL，再运行相同契约。
+{{end}}
+## 运行时默认值
+
+服务使用请求 ID、通过 `*slog.Logger` 的 JSON 结构化日志、panic 恢复、1 MiB 请求体限制、15 秒请求超时、安全头、可配置 CORS，以及 10 秒优雅关闭。关闭顺序为 HTTP 服务，然后（若已选择）NATS drain、Redis close、SQL close，最后 flush 日志。
+{{if .Options.IsPostgres}}
+PostgreSQL 连接池默认最多 25 个连接、25 个空闲连接，连接最长存活 30 分钟、最长空闲 5 分钟；可通过 `DB_MAX_OPEN_CONNS`、`DB_MAX_IDLE_CONNS`、`DB_CONN_MAX_LIFETIME` 和 `DB_CONN_MAX_IDLE_TIME` 配置。启动时会在 `DB_CONNECT_TIMEOUT`（默认 5 秒）内执行数据库探测，失败则拒绝启动。
+{{end}}
+## 镜像许可证
+
+固定的工具镜像和服务器镜像不使用本仓库的 MIT 许可证：
+
+- `{{.Pins.AtlasImage}}`：Apache License 2.0
+{{if .Options.IsPostgres}}- `{{.Pins.PostgresImage}}`：PostgreSQL License
+{{end}}{{if .Options.HasRedis}}- `{{.Pins.RedisImage}}`：Redis 源码可用许可证（RSALv2 / SSPLv1 / AGPLv3），不是 MIT
+{{end}}{{if .Options.HasNATS}}- `{{.Pins.NATSImage}}`：Apache License 2.0
+{{end}}
+## License
+
+MIT

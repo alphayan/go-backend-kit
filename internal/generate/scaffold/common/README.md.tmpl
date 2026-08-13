@@ -1,0 +1,140 @@
+# {{.Module}}
+
+Generated with [go-backend-kit](https://github.com/alphayan/go-backend-kit) {{.Version}}.
+
+[中文说明](README.zh-CN.md)
+
+## Requirements
+
+- Go {{.Pins.GoVersion}} or newer; toolchain {{.Pins.Toolchain}} is recommended
+{{if or .Options.IsPostgres .Options.HasRedis .Options.HasNATS}}- Docker for selected development services and Atlas migrations
+{{else}}- Docker is not required to run the application. Atlas migrations still use the pinned Atlas Community image when you generate SQL.
+{{end}}
+This project was created with:
+
+```text
+--http {{.Options.HTTP}} --database {{.Options.Database}} --cache {{.Options.Cache}} --messaging {{.Options.Messaging}} --logging {{.Options.Logging}} --auth {{.Options.Auth}}
+```
+
+Provider choices are recorded in `.gobackend-project.json` and cannot be edited in place. Create a new project to change them.
+
+## Add a resource
+
+```bash
+go tool gobackend add path/to/resource.yaml
+go tool gobackend check
+```
+
+The YAML files in `resources/` are the source of truth. The tracked `.gobackend-generated.json` manifest records every generator-owned path and its SHA-256 digest; handwritten `.go` files are never overwritten. A stale generated file is removed only if its bytes still match the manifest. If it was modified, generation fails safely instead of deleting it.
+
+`go tool gobackend generate` invokes the pinned official `go tool gorm gen` workflow to regenerate field helpers used by store filters and sorting. The official GORM CLI is the sole producer of `gormgen/query_gen.go`; gobackend does not rewrite that output.
+
+## Database and migrations
+{{if .Options.IsSQLite}}
+The default database file is `data/app.db` (`DATABASE_PATH`). The process creates the parent directory, enables foreign keys, WAL, and a busy timeout, and uses a single connection. Builds and tests should pass with `CGO_ENABLED=0`.
+
+SQLite is a real runtime, not only a test double. Workloads that need PostgreSQL concurrency, locking, or native numeric semantics should be created with `--database postgres`. Changing database choice after migrations exist is unsupported.
+
+```bash
+make migration name=create_products
+make migrate-apply
+```
+{{else}}
+```bash
+docker compose up -d postgres
+make migration name=create_products
+DATABASE_URL='postgres://app:app@localhost:5432/app?sslmode=disable' make migrate-apply
+```
+{{end}}
+The migration command runs the pinned open-source Atlas Community Docker image `{{.Pins.AtlasImage}}`. It first executes the generated GORM Provider program on the host, then asks Atlas to diff the desired schema against a disposable development database. The application database is never used as Atlas's dev database. The Community profile is used for versioned migration generation and application plus a direct schema comparison; advanced migration linting, rollback, migration testing, approval policies, and advanced database-object governance are outside this profile. Review the SQL in `migrations/` before applying it.
+
+Production startup never calls `AutoMigrate`.
+{{if .Options.HasRedis}}
+## Redis
+
+Redis is available as `*redis.Client` from `internal/platform/cache`. Generated CRUD handlers are not cached automatically. Handwritten code that needs caching should define the small `Get`/`Set`/`Delete` interface it actually uses.
+
+```bash
+docker compose up -d redis
+```
+
+Set `REDIS_URL` (see `.env.example`). Do not commit secrets. The Compose Redis port binds to `127.0.0.1`.
+{{end}}{{if .Options.HasNATS}}
+## NATS
+
+NATS is available as `*nats.Conn` from `internal/platform/messaging`. Generated CRUD handlers do not publish events or create JetStream resources. Handwritten publishers/subscribers should define the small interface they need.
+
+```bash
+docker compose up -d nats
+```
+
+Set `NATS_URL` (see `.env.example`).
+{{end}}{{if .Options.HasJWT}}
+## JWT verification
+
+`/api/v1` requires a bearer JWT. These routes stay public: `/health/live`, `/health/ready`, `/openapi.json`, and `/docs`.
+
+This project only verifies externally issued HS256 tokens. It does not create users, passwords, login, refresh tokens, or RBAC.
+
+Generate a local key and keep it out of git:
+
+```bash
+openssl rand -base64 32
+```
+
+Put the value in `AUTH_JWT_SECRET_B64` in a local `.env` that is gitignored. Also set `AUTH_JWT_ISSUER` and `AUTH_JWT_AUDIENCE`. Optional `AUTH_JWT_LEEWAY` defaults to 30s and is capped at 2m.
+
+Example test token (replace issuer, audience, and key):
+
+```bash
+# Use a trusted local tool or test helper. Never commit the key or a production token.
+```
+{{end}}
+## Run
+
+```bash
+cp .env.example .env
+set -a; . ./.env; set +a
+make run
+```
+
+Endpoints:
+
+- API: `http://localhost:8080/api/v1`
+- Live health: `http://localhost:8080/health/live`
+- Ready health: `http://localhost:8080/health/ready`
+- OpenAPI: `http://localhost:8080/openapi.json`
+- Swagger UI: `http://localhost:8080/docs`
+
+## Verify
+
+```bash
+go tool gobackend check
+{{if .Options.IsSQLite}}CGO_ENABLED=0 go test -race ./...
+{{else}}go test -race ./...
+{{end}}go vet ./...
+go tool govulncheck ./...
+```
+{{if .Options.IsSQLite}}
+SQLite contract tests use an in-memory database. CI runs with `CGO_ENABLED=0`.
+{{else}}
+CI applies reviewed migrations to PostgreSQL and runs the same generated contracts against it.
+{{end}}
+## Runtime defaults
+
+The server uses request IDs, JSON structured logging through `*slog.Logger`, panic recovery, a 1 MiB body limit, a 15-second request timeout, security headers, configurable CORS, and a 10-second graceful shutdown. Shutdown closes the HTTP server, then drains NATS if selected, closes Redis if selected, closes SQL, and flushes logs.
+{{if .Options.IsPostgres}}
+The PostgreSQL pool defaults to 25 open connections, 25 idle connections, a 30-minute connection lifetime, and a 5-minute idle lifetime. Configure it with `DB_MAX_OPEN_CONNS`, `DB_MAX_IDLE_CONNS`, `DB_CONN_MAX_LIFETIME`, and `DB_CONN_MAX_IDLE_TIME`. Startup performs a fail-closed database probe bounded by `DB_CONNECT_TIMEOUT`, which defaults to 5 seconds.
+{{end}}
+## Image licenses
+
+Pinned tool and server images are not covered by this repository's MIT license:
+
+- `{{.Pins.AtlasImage}}`: Apache License 2.0
+{{if .Options.IsPostgres}}- `{{.Pins.PostgresImage}}`: PostgreSQL License
+{{end}}{{if .Options.HasRedis}}- `{{.Pins.RedisImage}}`: Redis source-available licenses (RSALv2 / SSPLv1 / AGPLv3), not MIT
+{{end}}{{if .Options.HasNATS}}- `{{.Pins.NATSImage}}`: Apache License 2.0
+{{end}}
+## License
+
+MIT

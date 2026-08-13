@@ -1,0 +1,41 @@
+module {{.Module}}
+
+go {{.Pins.GoVersion}}
+
+toolchain {{.Pins.Toolchain}}
+
+tool (
+	github.com/alphayan/go-backend-kit/cmd/gobackend
+	golang.org/x/vuln/cmd/govulncheck
+	gorm.io/cli/gorm
+)
+
+require (
+	ariga.io/atlas {{.Pins.Atlas}}
+	ariga.io/atlas-provider-gorm {{.Pins.AtlasGorm}}
+	github.com/alphayan/go-backend-kit {{.Version}}
+	github.com/google/uuid {{.Pins.UUID}}
+	github.com/libtnb/sqlite {{.Pins.SQLite}}
+	github.com/shopspring/decimal {{.Pins.Decimal}}
+	github.com/swaggest/swgui {{.Pins.Swgui}}
+	golang.org/x/vuln {{.Pins.Vuln}}
+	go.opentelemetry.io/otel/sdk {{.Pins.OTelSDK}} // indirect
+	google.golang.org/grpc {{.Pins.GRPC}} // indirect
+	github.com/jackc/pgx/v5 {{.Pins.Pgx}} // indirect
+	gorm.io/cli/gorm {{.Pins.GormCLI}}
+	gorm.io/datatypes {{.Pins.Datatypes}}
+	gorm.io/gorm {{.Pins.Gorm}}
+{{if .Options.IsEcho}}	github.com/labstack/echo/v5 {{.Pins.Echo}}
+{{end}}{{if .Options.IsFiber}}	github.com/gofiber/fiber/v3 {{.Pins.Fiber}}
+{{end}}{{if .Options.IsPostgres}}	gorm.io/driver/postgres {{.Pins.GormPostgres}}
+{{end}}{{if .Options.HasRedis}}	github.com/redis/go-redis/v9 {{.Pins.Redis}}
+{{end}}{{if .Options.HasNATS}}	github.com/nats-io/nats.go {{.Pins.NATS}}
+{{end}}{{if .Options.HasJWT}}	github.com/go-jose/go-jose/v4 {{.Pins.Jose}}
+{{end}}{{if .Options.IsZap}}	go.uber.org/zap {{.Pins.Zap}}
+	github.com/samber/slog-zap/v2 {{.Pins.SlogZap}}
+{{end}}{{if .Options.IsZerolog}}	github.com/rs/zerolog {{.Pins.Zerolog}}
+	github.com/samber/slog-zerolog/v2 {{.Pins.SlogZerolog}}
+{{end}})
+{{if .DevelopmentReplace}}
+replace github.com/alphayan/go-backend-kit => {{.DevelopmentReplace}}
+{{end}}

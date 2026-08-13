@@ -3,6 +3,7 @@ package generate_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -64,7 +65,7 @@ func TestNewAddGenerateAndCheck(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "task-api")
 	g := testGenerator(t)
-	if err := g.New(ctx, root, "example.com/task-api"); err != nil {
+	if err := g.New(ctx, root, "example.com/task-api", generate.DefaultProjectOptions()); err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 	source := filepath.Join(t.TempDir(), "task.yaml")
@@ -198,22 +199,39 @@ func TestNewAddGenerateAndCheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(ci), "schema diff --env ci --from env://url --to env://src --exclude atlas_schema_revisions --format '{{ sql . \"  \" }}'") {
-		t.Fatal("generated CI does not check migration/schema drift")
+	if !strings.Contains(string(ci), `CGO_ENABLED: "0"`) {
+		t.Fatal("generated SQLite CI does not disable CGO")
+	}
+	if strings.Contains(string(ci), "schema diff --env ci") || strings.Contains(string(ci), "postgres:") {
+		t.Fatal("default SQLite project CI still runs PostgreSQL schema-diff jobs")
+	}
+	if strings.Contains(string(ci), "migrate lint") {
+		t.Fatal("generated CI promises Atlas linting that Community edition does not provide")
+	}
+	if _, err := os.Stat(filepath.Join(root, "docker-compose.yml")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("default SQLite project emitted docker-compose.yml")
+	}
+	atlas, err := os.ReadFile(filepath.Join(root, "scripts", "atlas.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	atlasSource := string(atlas)
+	if !strings.Contains(atlasSource, `dev_db=".gobackend/atlas-dev-$$.db"`) ||
+		!strings.Contains(atlasSource, `ATLAS_DEV_URL=sqlite:///workspace/${dev_db}?mode=rwc`) {
+		t.Fatal("SQLite Atlas script does not use a disposable .gobackend development database")
+	}
+	if strings.Contains(atlasSource, "ATLAS_DEV_URL=sqlite:///workspace/data/app.db") {
+		t.Fatal("SQLite Atlas script uses the application database as the development database")
 	}
 	moduleFile, err := os.ReadFile(filepath.Join(root, "go.mod"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(moduleFile), "go 1.26.4\n\ntoolchain go1.26.5\n") {
-		t.Fatal("generated go.mod does not separate the Go minimum from the preferred toolchain")
+	if !strings.Contains(string(moduleFile), "go 1.26.5\n") {
+		t.Fatal("generated go.mod does not pin go 1.26.5")
 	}
-	if strings.Contains(string(ci), "migrate lint") {
-		t.Fatal("generated CI promises Atlas linting that Community edition does not provide")
-	}
-	if !strings.Contains(string(ci), "migrate apply --env ci") ||
-		!strings.Contains(string(ci), "schema diff --env ci --from env://url --to env://src") {
-		t.Fatal("generated CI does not apply and compare versioned migrations")
+	if strings.Contains(string(moduleFile), "toolchain ") && !strings.Contains(string(moduleFile), "toolchain go1.26.5") {
+		t.Fatal("generated go.mod pins a toolchain other than go1.26.5")
 	}
 	makefile, err := os.ReadFile(filepath.Join(root, "Makefile"))
 	if err != nil {
@@ -251,11 +269,43 @@ func TestNewAddGenerateAndCheck(t *testing.T) {
 	}
 }
 
+func TestNewPostgresProjectEmitsSchemaDiffCI(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "api")
+	g := testGenerator(t)
+	if err := g.New(t.Context(), root, "example.com/api", generate.LegacyProjectOptions()); err != nil {
+		t.Fatal(err)
+	}
+	ci, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(ci), "schema diff --env ci --from env://url --to env://src --exclude atlas_schema_revisions --format '{{ sql . \"  \" }}'") {
+		t.Fatal("generated PostgreSQL CI does not check migration/schema drift")
+	}
+	if !strings.Contains(string(ci), "migrate apply --env ci") {
+		t.Fatal("generated PostgreSQL CI does not apply versioned migrations")
+	}
+	if _, err := os.Stat(filepath.Join(root, "docker-compose.yml")); err != nil {
+		t.Fatalf("postgres project missing docker-compose.yml: %v", err)
+	}
+	compose, err := os.ReadFile(filepath.Join(root, "docker-compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	composeText := string(compose)
+	if strings.Contains(composeText, "/var/lib/postgresql/data") {
+		t.Fatal("PostgreSQL 18 compose volume must not mount /var/lib/postgresql/data")
+	}
+	if !strings.Contains(composeText, "postgres-data:/var/lib/postgresql") {
+		t.Fatal("PostgreSQL 18 compose volume must mount /var/lib/postgresql")
+	}
+}
+
 func TestCheckDetectsDrift(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "api")
 	g := testGenerator(t)
-	if err := g.New(ctx, root, "example.com/api"); err != nil {
+	if err := g.New(ctx, root, "example.com/api", generate.DefaultProjectOptions()); err != nil {
 		t.Fatal(err)
 	}
 	generated := filepath.Join(root, "internal/generated/register_gen.go")
@@ -270,7 +320,7 @@ func TestCheckDetectsDrift(t *testing.T) {
 func TestGeneratePreservesUnownedGeneratedFiles(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "api")
 	g := testGenerator(t)
-	if err := g.New(t.Context(), root, "example.com/api"); err != nil {
+	if err := g.New(t.Context(), root, "example.com/api", generate.DefaultProjectOptions()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -305,10 +355,72 @@ func TestGeneratePreservesUnownedGeneratedFiles(t *testing.T) {
 	}
 }
 
+func TestNewWritesProjectMetadata(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "api")
+	g := testGenerator(t)
+	if err := g.New(t.Context(), root, "example.com/api", generate.DefaultProjectOptions()); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, ".gobackend-project.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{
+		`"generated_by": "gobackend"`,
+		`"schema_version": 1`,
+		`"http": "echo"`,
+		`"database": "sqlite"`,
+		`"cache": "none"`,
+		`"messaging": "none"`,
+		`"logging": "slog"`,
+		`"auth": "none"`,
+	} {
+		if !strings.Contains(string(data), value) {
+			t.Errorf("project metadata does not contain %q:\n%s", value, data)
+		}
+	}
+	if err := g.Check(t.Context(), root); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGenerateFailsClosedWhenMetadataIsInvalid(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "api")
+	g := testGenerator(t)
+	if err := g.New(t.Context(), root, "example.com/api", generate.DefaultProjectOptions()); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, ".gobackend-project.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	raw["fingerprint"] = strings.Repeat("a", 64)
+	tampered, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(tampered, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshot(t, root)
+	err = g.Generate(t.Context(), root)
+	if err == nil || !strings.Contains(err.Error(), "fingerprint") || !strings.Contains(err.Error(), "create a new project") {
+		t.Fatalf("Generate() error = %v, want fingerprint failure", err)
+	}
+	if snapshot(t, root) != before {
+		t.Fatal("invalid metadata generation mutated the project")
+	}
+}
+
 func TestNewWritesGeneratedManifest(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "api")
 	g := testGenerator(t)
-	if err := g.New(t.Context(), root, "example.com/api"); err != nil {
+	if err := g.New(t.Context(), root, "example.com/api", generate.DefaultProjectOptions()); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(root, ".gobackend-generated.json"))
@@ -319,6 +431,7 @@ func TestNewWritesGeneratedManifest(t *testing.T) {
 		`"generated_by": "gobackend"`,
 		`"version": 1`,
 		`"internal/generated/register_gen.go"`,
+		`".gobackend-project.json"`,
 	} {
 		if !strings.Contains(string(data), value) {
 			t.Errorf("manifest does not contain %q:\n%s", value, data)
@@ -329,7 +442,7 @@ func TestNewWritesGeneratedManifest(t *testing.T) {
 func TestNewPinsRemediatedSecurityDependencies(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "api")
 	g := testGenerator(t)
-	if err := g.New(t.Context(), root, "example.com/api"); err != nil {
+	if err := g.New(t.Context(), root, "example.com/api", generate.DefaultProjectOptions()); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(root, "go.mod"))
@@ -347,6 +460,7 @@ func TestNewPinsRemediatedSecurityDependencies(t *testing.T) {
 	for dependency, minimum := range map[string]string{
 		"google.golang.org/grpc":   "v1.82.1",
 		"go.opentelemetry.io/otel": "v1.41.0",
+		"github.com/jackc/pgx/v5":  "v5.9.2",
 	} {
 		if got := versions[dependency]; !semver.IsValid(got) || semver.Compare(got, minimum) < 0 {
 			t.Errorf("%s version = %q, want at least %s", dependency, got, minimum)
@@ -400,7 +514,7 @@ func TestGenerateRejectsManifestSymlinkEscape(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "api")
 	g := testGenerator(t)
-	if err := g.New(t.Context(), root, "example.com/api"); err != nil {
+	if err := g.New(t.Context(), root, "example.com/api", generate.DefaultProjectOptions()); err != nil {
 		t.Fatal(err)
 	}
 	source := filepath.Join(base, "task.yaml")
@@ -443,7 +557,7 @@ func TestGenerateRejectsManifestSymlinkEscape(t *testing.T) {
 func TestGenerateNeverOverwritesUnownedManagedPath(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "api")
 	g := testGenerator(t)
-	if err := g.New(context.Background(), root, "example.com/api"); err != nil {
+	if err := g.New(context.Background(), root, "example.com/api", generate.DefaultProjectOptions()); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, "internal", "generated", "register_gen.go")
@@ -463,7 +577,7 @@ func TestGeneratedContractCoversCRUDAndSafety(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "api")
 	g := testGenerator(t)
-	if err := g.New(ctx, root, "example.com/api"); err != nil {
+	if err := g.New(ctx, root, "example.com/api", generate.DefaultProjectOptions()); err != nil {
 		t.Fatal(err)
 	}
 	source := filepath.Join(t.TempDir(), "task.yaml")
@@ -490,7 +604,7 @@ func TestNewRejectsNonEmptyDirectory(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "keep.txt"), []byte("mine"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := (generate.Generator{}).New(context.Background(), root, "example.com/api")
+	err := (generate.Generator{}).New(context.Background(), root, "example.com/api", generate.DefaultProjectOptions())
 	if err == nil {
 		t.Fatal("New() error = nil")
 	}
@@ -511,7 +625,7 @@ func TestNewSupportsEmptyCurrentWorkingDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := g.New(context.Background(), ".", "example.com/api"); err != nil {
+	if err := g.New(context.Background(), ".", "example.com/api", generate.DefaultProjectOptions()); err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 	after, err := os.Stat(".")
@@ -529,7 +643,7 @@ func TestNewSupportsEmptyCurrentWorkingDirectory(t *testing.T) {
 func TestGenerateRejectsPackageCollisions(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "api")
 	g := testGenerator(t)
-	if err := g.New(context.Background(), root, "example.com/api"); err != nil {
+	if err := g.New(context.Background(), root, "example.com/api", generate.DefaultProjectOptions()); err != nil {
 		t.Fatal(err)
 	}
 	resources := map[string]string{
@@ -547,6 +661,7 @@ func TestGenerateRejectsPackageCollisions(t *testing.T) {
 }
 
 func TestGeneratedProjectCompilesAndRunsContract(t *testing.T) {
+	t.Setenv("CGO_ENABLED", "0")
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "task-api")
 	kitRoot, err := filepath.Abs(filepath.Join("..", ".."))
@@ -554,7 +669,7 @@ func TestGeneratedProjectCompilesAndRunsContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := generate.Generator{Version: "v0.1.0", DevelopmentReplace: kitRoot}
-	if err := g.New(ctx, root, "example.com/task-api"); err != nil {
+	if err := g.New(ctx, root, "example.com/task-api", generate.DefaultProjectOptions()); err != nil {
 		t.Fatal(err)
 	}
 	source := filepath.Join(t.TempDir(), "task.yaml")
@@ -629,7 +744,7 @@ func generatedTaskProject(t *testing.T) (string, generate.Generator) {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "api")
 	g := testGenerator(t)
-	if err := g.New(t.Context(), root, "example.com/api"); err != nil {
+	if err := g.New(t.Context(), root, "example.com/api", generate.DefaultProjectOptions()); err != nil {
 		t.Fatal(err)
 	}
 	source := filepath.Join(t.TempDir(), "task.yaml")

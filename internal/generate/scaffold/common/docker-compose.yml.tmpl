@@ -1,0 +1,39 @@
+{{if or .Options.IsPostgres .Options.HasRedis .Options.HasNATS}}services:
+{{if .Options.IsPostgres}}  postgres:
+    image: {{.Pins.PostgresImage}}
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql
+{{end}}{{if .Options.HasRedis}}  redis:
+    image: {{.Pins.RedisImage}}
+    command: ["redis-server", "--protected-mode", "yes", "--bind", "0.0.0.0"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+{{end}}{{if .Options.HasNATS}}  nats:
+    image: {{.Pins.NATSImage}}
+    ports:
+      - "127.0.0.1:4222:4222"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:8222/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+{{end}}{{if .Options.IsPostgres}}
+volumes:
+  postgres-data:
+{{end}}{{end}}

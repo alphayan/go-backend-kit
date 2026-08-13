@@ -1,0 +1,44 @@
+package logging
+
+import (
+	"errors"
+	"log/slog"
+	"os"
+	"syscall"
+	"testing"
+)
+
+func TestNewReturnsSlogLoggerAndFlush(t *testing.T) {
+	logger, flush, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if logger == nil {
+		t.Fatal("logger is nil")
+	}
+	logger.LogAttrs(t.Context(), slog.LevelInfo, "http_request", slog.String("request_id", "test"))
+	if err := flush(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFlushIgnoresHarmlessStdioSyncErrors(t *testing.T) {
+	tests := []error{
+		syscall.EINVAL,
+		syscall.EBADF,
+		&os.PathError{Op: "sync", Path: "/dev/stdout", Err: syscall.EINVAL},
+		&os.PathError{Op: "sync", Path: "/dev/stderr", Err: syscall.EBADF},
+	}
+	for _, want := range tests {
+		if err := flushSync(func() error { return want }); err != nil {
+			t.Errorf("flushSync(%v) = %v, want nil", want, err)
+		}
+	}
+}
+
+func TestFlushPropagatesRealSyncErrors(t *testing.T) {
+	want := errors.New("disk full")
+	if err := flushSync(func() error { return want }); !errors.Is(err, want) {
+		t.Fatalf("flushSync() = %v, want %v", err, want)
+	}
+}

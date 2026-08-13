@@ -1,0 +1,52 @@
+package database
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/libtnb/sqlite"
+	"gorm.io/gorm"
+)
+
+type Connection struct {
+	ORM *gorm.DB
+	SQL *sql.DB
+}
+
+func Open(ctx context.Context, path string) (*Connection, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("create database directory: %w", err)
+	}
+	dsn := path + "?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+	orm, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
+		TranslateError: true,
+		NowFunc:        func() time.Time { return time.Now().UTC() },
+		Logger:         newSlogLogger(slog.Default()),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	sqlDB, err := orm.DB()
+	if err != nil {
+		return nil, fmt.Errorf("access database pool: %w", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxIdleConns(1)
+	if err := sqlDB.PingContext(ctx); err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("ping database: %w", err)
+	}
+	return &Connection{ORM: orm, SQL: sqlDB}, nil
+}
+
+func (connection *Connection) Close() error {
+	if connection == nil || connection.SQL == nil {
+		return nil
+	}
+	return connection.SQL.Close()
+}

@@ -39,7 +39,7 @@ func TestOpenAPIRejectsComponentNameCollisions(t *testing.T) {
 			for _, resourceName := range test.resourceNames {
 				resources = append(resources, parseOpenAPIResource(t, resourceName))
 			}
-			_, err := renderGenerated("example.com/api", resources)
+			_, err := renderGenerated("example.com/api", resources, DefaultProjectOptions())
 			if err == nil {
 				t.Fatal("renderGenerated() error = nil, want component collision")
 			}
@@ -85,7 +85,7 @@ fields:
 	if err != nil {
 		t.Fatal(err)
 	}
-	document, err := buildOpenAPI([]spec.Resource{resource})
+	document, err := buildOpenAPI([]spec.Resource{resource}, DefaultProjectOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ fields:
 	if err != nil {
 		t.Fatal(err)
 	}
-	document, err := buildOpenAPI([]spec.Resource{resource})
+	document, err := buildOpenAPI([]spec.Resource{resource}, DefaultProjectOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,5 +163,47 @@ fields:
 	}
 	if err := compiled.Validate(map[string]any{"payload": nil}); err == nil {
 		t.Fatal("non-nullable JSON schema accepted null")
+	}
+}
+
+func TestOpenAPIJWTSecurityScheme(t *testing.T) {
+	resource := parseOpenAPIResource(t, "Task")
+	none, err := buildOpenAPI([]spec.Resource{resource}, DefaultProjectOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	noneComponents := none["components"].(map[string]any)
+	if _, exists := noneComponents["securitySchemes"]; exists {
+		t.Fatal("auth=none declared securitySchemes")
+	}
+	paths := none["paths"].(map[string]any)
+	collection := paths["/api/v1/tasks"].(map[string]any)
+	get := collection["get"].(map[string]any)
+	if _, exists := get["security"]; exists {
+		t.Fatal("auth=none list operation declared security")
+	}
+	responses := get["responses"].(map[string]any)
+	if _, exists := responses["401"]; exists {
+		t.Fatal("auth=none list operation declared 401")
+	}
+
+	jwtOpts := DefaultProjectOptions()
+	jwtOpts.Auth = AuthJWT
+	withJWT, err := buildOpenAPI([]spec.Resource{resource}, jwtOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	components := withJWT["components"].(map[string]any)
+	schemes := components["securitySchemes"].(map[string]any)
+	bearer := schemes["bearerAuth"].(map[string]any)
+	if bearer["type"] != "http" || bearer["scheme"] != "bearer" || bearer["bearerFormat"] != "JWT" {
+		t.Fatalf("bearerAuth = %#v", bearer)
+	}
+	jwtGet := withJWT["paths"].(map[string]any)["/api/v1/tasks"].(map[string]any)["get"].(map[string]any)
+	if _, exists := jwtGet["security"]; !exists {
+		t.Fatal("JWT list operation missing security")
+	}
+	if _, exists := jwtGet["responses"].(map[string]any)["401"]; !exists {
+		t.Fatal("JWT list operation missing 401")
 	}
 }

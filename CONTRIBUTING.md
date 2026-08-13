@@ -15,7 +15,7 @@ These commands remain the authoritative CI and release gates. Generated output i
 
 ## Local quality toolkit
 
-This repository vendors [make-toolkit](https://github.com/alphayan/make-toolkit) at commit `a535269` under `tools/make-toolkit` for local development checks. It applies only to this kit repo. Generated-project Makefiles (`internal/generate/scaffold/Makefile.tmpl`) are out of scope.
+This repository vendors [make-toolkit](https://github.com/alphayan/make-toolkit) at commit `a535269` under `tools/make-toolkit` for local development checks. It applies only to this kit repo. Generated-project Makefiles (`internal/generate/scaffold/common/Makefile.tmpl`) are out of scope.
 
 ```bash
 make tk-help         # list toolkit targets

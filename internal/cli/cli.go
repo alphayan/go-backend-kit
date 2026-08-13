@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"runtime/debug"
+	"strings"
 
 	"github.com/alphayan/go-backend-kit/internal/generate"
 	"github.com/spf13/cobra"
@@ -46,13 +47,37 @@ func newCommand(info BuildInfo) *cobra.Command {
 		Use:   "new <dir>",
 		Short: "Create a complete backend project",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return (generate.Generator{Version: releaseVersion(info.Version), DevelopmentReplace: os.Getenv("GOBACKEND_DEVELOPMENT_REPLACE")}).New(cmd.Context(), args[0], modulePath)
-		},
 	}
 	command.Flags().StringVar(&modulePath, "module", "", "public Go module path")
 	_ = command.MarkFlagRequired("module")
+	httpChoice := string(generate.HTTPEcho)
+	databaseChoice := string(generate.DatabaseSQLite)
+	cacheChoice := string(generate.CacheNone)
+	messagingChoice := string(generate.MessagingNone)
+	loggingChoice := string(generate.LoggingSlog)
+	authChoice := string(generate.AuthNone)
+	registerChoiceFlag(command, "http", &httpChoice, string(generate.HTTPEcho), "HTTP framework", []string{"echo", "fiber"})
+	registerChoiceFlag(command, "database", &databaseChoice, string(generate.DatabaseSQLite), "database", []string{"sqlite", "postgres"})
+	registerChoiceFlag(command, "cache", &cacheChoice, string(generate.CacheNone), "cache", []string{"none", "redis"})
+	registerChoiceFlag(command, "messaging", &messagingChoice, string(generate.MessagingNone), "messaging", []string{"none", "nats"})
+	registerChoiceFlag(command, "logging", &loggingChoice, string(generate.LoggingSlog), "logging backend", []string{"slog", "zap", "zerolog"})
+	registerChoiceFlag(command, "auth", &authChoice, string(generate.AuthNone), "authentication", []string{"none", "jwt"})
+	command.RunE = func(cmd *cobra.Command, args []string) error {
+		return (generate.Generator{Version: releaseVersion(info.Version), DevelopmentReplace: os.Getenv("GOBACKEND_DEVELOPMENT_REPLACE")}).New(cmd.Context(), args[0], modulePath, generate.ProjectOptions{
+			HTTP:      generate.HTTPChoice(httpChoice),
+			Database:  generate.DatabaseChoice(databaseChoice),
+			Cache:     generate.CacheChoice(cacheChoice),
+			Messaging: generate.MessagingChoice(messagingChoice),
+			Logging:   generate.LoggingChoice(loggingChoice),
+			Auth:      generate.AuthChoice(authChoice),
+		})
+	}
 	return command
+}
+
+func registerChoiceFlag(command *cobra.Command, name string, target *string, defaultValue, usage string, values []string) {
+	command.Flags().StringVar(target, name, defaultValue, usage+" ("+strings.Join(values, "|")+")")
+	_ = command.RegisterFlagCompletionFunc(name, cobra.FixedCompletions(values, cobra.ShellCompDirectiveNoFileComp))
 }
 
 func addCommand(info BuildInfo) *cobra.Command {

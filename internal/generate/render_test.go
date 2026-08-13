@@ -116,14 +116,15 @@ fields:
 		t.Fatal(err)
 	}
 
-	rendered, err := executeGoTemplate("store_gen.go", storeTemplate, resourceData{
+	postgres, err := executeGoTemplate("store_gen.go", storeTemplate, resourceData{
 		Module:   "example.com/project",
 		Resource: resource,
+		Options:  LegacyProjectOptions(),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := string(rendered)
+	source := string(postgres)
 	for _, want := range []string{
 		`"database/sql"`,
 		`&sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}`,
@@ -131,10 +132,82 @@ fields:
 		`updated = item`,
 	} {
 		if !strings.Contains(source, want) {
-			t.Errorf("generated store does not contain %q:\n%s", want, source)
+			t.Errorf("generated postgres store does not contain %q:\n%s", want, source)
 		}
 	}
 	if strings.Contains(source, "return s.get(ctx, id)") {
 		t.Errorf("generated update reads outside its transaction:\n%s", source)
+	}
+
+	sqlite, err := executeGoTemplate("store_gen.go", storeTemplate, resourceData{
+		Module:   "example.com/project",
+		Resource: resource,
+		Options:  DefaultProjectOptions(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqliteSource := string(sqlite)
+	if strings.Contains(sqliteSource, `"database/sql"`) || strings.Contains(sqliteSource, "sql.TxOptions") {
+		t.Fatalf("sqlite store retained postgres transaction options:\n%s", sqliteSource)
+	}
+}
+
+func TestRenderGeneratedSelectsHTTPDatabaseAndAuth(t *testing.T) {
+	resource, err := spec.Parse([]byte(`schema_version: 1
+name: Task
+table: tasks
+route: /tasks
+fields:
+  - name: title
+    type: string
+  - name: external_id
+    type: uuid
+  - name: metadata
+    type: json
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fiberOpts := DefaultProjectOptions()
+	fiberOpts.HTTP = HTTPFiber
+	fiberFiles, err := renderGenerated("example.com/project", []spec.Resource{resource}, fiberOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fiberHTTP := string(fiberFiles["internal/resources/task/http_gen.go"])
+	if !strings.Contains(fiberHTTP, "fiber.Ctx") || strings.Contains(fiberHTTP, "echo.Context") {
+		t.Fatalf("fiber HTTP template was not selected:\n%s", fiberHTTP)
+	}
+	if strings.Contains(string(fiberFiles["internal/generated/register_gen.go"]), "echo.Group") {
+		t.Fatal("fiber registrar still imports Echo")
+	}
+
+	sqliteFiles, err := renderGenerated("example.com/project", []spec.Resource{resource}, DefaultProjectOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := string(sqliteFiles["internal/resources/task/model_gen.go"])
+	if !strings.Contains(model, "column:external_id;type:text;not null") {
+		t.Fatalf("sqlite UUID tag missing:\n%s", model)
+	}
+	if !strings.Contains(model, "column:metadata;type:json;not null") {
+		t.Fatalf("sqlite JSON tag missing:\n%s", model)
+	}
+
+	jwtOpts := DefaultProjectOptions()
+	jwtOpts.Auth = AuthJWT
+	jwtFiles, err := renderGenerated("example.com/project", []spec.Resource{resource}, jwtOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	specJSON := string(jwtFiles["openapi/openapi_gen.json"])
+	if !strings.Contains(specJSON, `"bearerAuth"`) || !strings.Contains(specJSON, `"401"`) {
+		t.Fatalf("JWT OpenAPI security missing:\n%s", specJSON)
+	}
+	noneSpec := string(sqliteFiles["openapi/openapi_gen.json"])
+	if strings.Contains(noneSpec, "bearerAuth") || strings.Contains(noneSpec, `"401"`) {
+		t.Fatalf("auth=none OpenAPI still declares bearer security:\n%s", noneSpec)
 	}
 }

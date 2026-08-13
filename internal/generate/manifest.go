@@ -184,7 +184,8 @@ func validateGeneratedPath(name string) error {
 
 func isGeneratedOutputPath(name string) bool {
 	switch name {
-	case "internal/generated/register_gen.go",
+	case projectMetadataName,
+		"internal/generated/register_gen.go",
 		"tools/gormschema/main_gen.go",
 		"openapi/embed_gen.go",
 		"openapi/openapi_gen.json":

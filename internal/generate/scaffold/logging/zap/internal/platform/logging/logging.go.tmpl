@@ -1,0 +1,32 @@
+package logging
+
+import (
+	"errors"
+	"log/slog"
+	"os"
+	"syscall"
+
+	slogzap "github.com/samber/slog-zap/v2"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+)
+
+func New() (*slog.Logger, func() error, error) {
+	config := zap.NewProductionEncoderConfig()
+	config.TimeKey = "time"
+	zapLogger := zap.New(zapcore.NewCore(zapcore.NewJSONEncoder(config), zapcore.AddSync(os.Stdout), zap.InfoLevel))
+	logger := slog.New(slogzap.Option{Level: slog.LevelInfo, Logger: zapLogger}.NewZapHandler())
+	return logger, func() error { return flushSync(zapLogger.Sync) }, nil
+}
+
+func flushSync(sync func() error) error {
+	err := sync()
+	if isIgnorableSyncError(err) {
+		return nil
+	}
+	return err
+}
+
+func isIgnorableSyncError(err error) bool {
+	return errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.EBADF)
+}

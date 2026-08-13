@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -38,9 +39,14 @@ type projectData struct {
 	Module             string
 	Version            string
 	DevelopmentReplace string
+	Options            ProjectOptions
+	Pins               dependencyPins
 }
 
-func (g Generator) New(ctx context.Context, target, modulePath string) error {
+func (g Generator) New(ctx context.Context, target, modulePath string, opts ProjectOptions) error {
+	if err := opts.Validate(); err != nil {
+		return err
+	}
 	if err := module.CheckPath(modulePath); err != nil {
 		return fmt.Errorf("invalid module path: %w", err)
 	}
@@ -72,7 +78,13 @@ func (g Generator) New(ctx context.Context, target, modulePath string) error {
 	}
 	defer func() { _ = os.RemoveAll(stage) }()
 
-	if err := renderScaffold(ctx, stage, projectData{Module: modulePath, Version: g.Version, DevelopmentReplace: filepath.ToSlash(g.DevelopmentReplace)}); err != nil {
+	if err := renderScaffold(ctx, stage, projectData{
+		Module:             modulePath,
+		Version:            g.Version,
+		DevelopmentReplace: filepath.ToSlash(g.DevelopmentReplace),
+		Options:            opts,
+		Pins:               currentPins(),
+	}); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Join(stage, "resources"), 0o755); err != nil {
@@ -80,6 +92,13 @@ func (g Generator) New(ctx context.Context, target, modulePath string) error {
 	}
 	if err := os.WriteFile(filepath.Join(stage, "resources", ".gitkeep"), nil, 0o644); err != nil {
 		return err
+	}
+	metadata, err := encodeProjectMetadata(g.Version, opts)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(stage, projectMetadataName), metadata, 0o644); err != nil {
+		return fmt.Errorf("write project metadata: %w", err)
 	}
 	if err := g.Generate(ctx, stage); err != nil {
 		return err
@@ -146,6 +165,9 @@ func (g Generator) Generate(ctx context.Context, root string) (err error) {
 }
 
 func (g Generator) generate(ctx context.Context, root string) error {
+	if g.Version == "" {
+		g.Version = "v0.1.0"
+	}
 	modulePath, err := readModule(root)
 	if err != nil {
 		return err
@@ -154,7 +176,11 @@ func (g Generator) generate(ctx context.Context, root string) error {
 	if err != nil {
 		return err
 	}
-	desired, err := renderDesired(ctx, root, modulePath, resources)
+	opts, err := loadProjectOptions(root)
+	if err != nil {
+		return err
+	}
+	desired, err := renderDesired(ctx, root, modulePath, g.Version, resources, opts)
 	if err != nil {
 		return err
 	}
@@ -171,6 +197,9 @@ func (g Generator) Check(ctx context.Context, root string) (err error) {
 	}
 	defer func() { err = errors.Join(err, unlock()) }()
 
+	if g.Version == "" {
+		g.Version = "v0.1.0"
+	}
 	modulePath, err := readModule(root)
 	if err != nil {
 		return err
@@ -179,7 +208,11 @@ func (g Generator) Check(ctx context.Context, root string) (err error) {
 	if err != nil {
 		return err
 	}
-	desired, err := renderDesired(ctx, root, modulePath, resources)
+	opts, err := loadProjectOptions(root)
+	if err != nil {
+		return err
+	}
+	desired, err := renderDesired(ctx, root, modulePath, g.Version, resources, opts)
 	if err != nil {
 		return err
 	}
@@ -205,11 +238,16 @@ func (g Generator) Check(ctx context.Context, root string) (err error) {
 	return nil
 }
 
-func renderDesired(ctx context.Context, root, modulePath string, resources []spec.Resource) (map[string][]byte, error) {
-	desired, err := renderGenerated(modulePath, resources)
+func renderDesired(ctx context.Context, root, modulePath, version string, resources []spec.Resource, opts ProjectOptions) (map[string][]byte, error) {
+	desired, err := renderGenerated(modulePath, resources, opts)
 	if err != nil {
 		return nil, err
 	}
+	metadata, err := encodeProjectMetadata(version, opts)
+	if err != nil {
+		return nil, err
+	}
+	desired[projectMetadataName] = metadata
 	if len(resources) == 0 {
 		if err := addGeneratedManifest(desired); err != nil {
 			return nil, err
@@ -306,47 +344,50 @@ func ensureMissingOrEmpty(path string) error {
 }
 
 func renderScaffold(ctx context.Context, root string, data projectData) error {
-	return fs.WalkDir(scaffoldFS, "scaffold", func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
+	files, err := selectedScaffoldFiles(data.Options)
+	if err != nil {
+		return err
+	}
+	for _, file := range files {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if entry.IsDir() {
-			return nil
-		}
-		rel := strings.TrimPrefix(path, "scaffold/")
-		rel = strings.TrimSuffix(rel, ".tmpl")
-		content, err := fs.ReadFile(scaffoldFS, path)
-		if err != nil {
+		if err := renderScaffoldFile(root, file, data); err != nil {
 			return err
 		}
-		tmpl, err := template.New(rel).Option("missingkey=error").Parse(string(content))
+	}
+	return nil
+}
+
+func renderScaffoldFile(root string, file scaffoldFile, data projectData) error {
+	content, err := fs.ReadFile(scaffoldFS, path.Join("scaffold", file.Source))
+	if err != nil {
+		return fmt.Errorf("read scaffold %s: %w", file.Source, err)
+	}
+	tmpl, err := template.New(file.Output).Option("missingkey=error").Parse(string(content))
+	if err != nil {
+		return fmt.Errorf("parse scaffold %s: %w", file.Source, err)
+	}
+	var rendered bytes.Buffer
+	if err := tmpl.Execute(&rendered, data); err != nil {
+		return fmt.Errorf("render scaffold %s: %w", file.Source, err)
+	}
+	output := rendered.Bytes()
+	if strings.HasSuffix(file.Output, ".go") {
+		output, err = format.Source(output)
 		if err != nil {
-			return fmt.Errorf("parse scaffold %s: %w", rel, err)
+			return fmt.Errorf("format scaffold %s: %w", file.Source, err)
 		}
-		var rendered bytes.Buffer
-		if err := tmpl.Execute(&rendered, data); err != nil {
-			return fmt.Errorf("render scaffold %s: %w", rel, err)
-		}
-		output := rendered.Bytes()
-		if strings.HasSuffix(rel, ".go") {
-			output, err = format.Source(output)
-			if err != nil {
-				return fmt.Errorf("format scaffold %s: %w", rel, err)
-			}
-		}
-		destination := filepath.Join(root, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
-			return err
-		}
-		mode := fs.FileMode(0o644)
-		if strings.HasSuffix(rel, ".sh") {
-			mode = 0o755
-		}
-		return os.WriteFile(destination, output, mode)
-	})
+	}
+	destination := filepath.Join(root, filepath.FromSlash(file.Output))
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		return err
+	}
+	mode := fs.FileMode(0o644)
+	if strings.HasSuffix(file.Output, ".sh") {
+		mode = 0o755
+	}
+	return os.WriteFile(destination, output, mode)
 }
 
 func readModule(root string) (string, error) {
@@ -485,6 +526,10 @@ func installGeneratedWithRemove(root string, desired map[string][]byte, remove r
 func isManagedGenerated(name string, data []byte) bool {
 	if name == generatedManifestName {
 		_, err := parseGeneratedManifest(data)
+		return err == nil
+	}
+	if name == projectMetadataName {
+		_, err := parseProjectMetadata(data)
 		return err == nil
 	}
 	if name == "openapi/openapi_gen.json" {

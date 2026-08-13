@@ -1,13 +1,15 @@
 # go-backend-kit
 
-`go-backend-kit` 是一个确定性 Go 后台脚手架：用严格 YAML 定义资源，即可生成 Echo v5 + GORM 的五接口 CRUD、PostgreSQL 版本化迁移、OpenAPI 3.1、内嵌 Swagger UI 和契约测试。
+`go-backend-kit` 是一个确定性 Go 后台脚手架：用严格 YAML 定义资源，即可生成五接口 CRUD、版本化迁移、OpenAPI 3.1、内嵌 Swagger UI 和契约测试。
+
+默认 `gobackend new` 选择是 Echo + SQLite + slog，不包含 Redis、NATS 或 JWT。PostgreSQL、Fiber、Redis、NATS、zap/zerolog 以及 JWT 校验在创建项目时按需选择。Provider 在生成期静态编入；生成的二进制没有插件注册表或 DI 容器。
 
 [English](README.md)
 
 ## 环境要求
 
-- Go 1.26.4 或更高版本（Atlas v1.2.3 的最低要求）；推荐 Go 1.26.5 或更新的受支持补丁版本
-- Docker，用于 PostgreSQL 开发环境和 Atlas 迁移
+- Go 1.26.5 或更高版本；生成项目固定 `go 1.26.5`
+- 默认 SQLite 项目运行应用不需要 Docker。选择 PostgreSQL、Redis、NATS 或执行 Atlas 迁移时需要 Docker。
 
 ## 快速开始
 
@@ -15,6 +17,17 @@
 go install github.com/alphayan/go-backend-kit/cmd/gobackend@v0.1.0
 gobackend new product-api --module github.com/yourname/product-api
 cd product-api
+```
+
+`new` 的可选参数（括号内为默认值）：
+
+```text
+--http echo|fiber           (默认 echo)
+--database sqlite|postgres  (默认 sqlite)
+--cache none|redis          (默认 none)
+--messaging none|nats       (默认 none)
+--logging slog|zap|zerolog  (默认 slog)
+--auth none|jwt             (默认 none)
 ```
 
 创建 `product.yaml`：
@@ -46,25 +59,26 @@ fields:
 
 ```bash
 go tool gobackend add product.yaml
-docker compose up -d postgres
 make migration name=create_products
-DATABASE_URL='postgres://app:app@localhost:5432/app?sslmode=disable' make migrate-apply
-DATABASE_URL='postgres://app:app@localhost:5432/app?sslmode=disable' make run
+make migrate-apply
+make run
 ```
+
+默认 SQLite 项目把数据放在 `data/app.db`，不需要 Compose。PostgreSQL 项目仍使用 `docker compose up -d postgres` 和 `DATABASE_URL`。
 
 访问 `http://localhost:8080/docs`。
 
 ## 命令
 
 ```text
-gobackend new <dir> --module <module-path>
+gobackend new <dir> --module <module-path> [--http echo|fiber] [--database sqlite|postgres] [--cache none|redis] [--messaging none|nats] [--logging slog|zap|zerolog] [--auth none|jwt]
 go tool gobackend add <resource.yaml>
 go tool gobackend generate
 go tool gobackend check
 go tool gobackend version
 ```
 
-生成项目使用 Go 的 `tool` 指令固定 `gobackend` 和 GORM CLI。`go tool gobackend generate` 保留官方 `go tool gorm gen` 工作流；`gormgen/query_gen.go` 只由官方 GORM CLI 生成，gobackend 不重写其输出。Atlas 官方已不再维护可由 Go 安装的当前 CLI 包，因此本地和 CI 都通过 `arigaio/atlas:1.2.3-community` 固定开源 Atlas CLI；Atlas Go 引擎和 GORM Provider 仍固定在 `go.mod`。
+生成项目使用 Go 的 `tool` 指令固定 `gobackend` 和 GORM CLI。`go tool gobackend generate` 保留官方 `go tool gorm gen` 工作流；`gormgen/query_gen.go` 只由官方 GORM CLI 生成，gobackend 不重写其输出。Atlas 官方已不再维护可由 Go 安装的当前 CLI 包，因此本地和 CI 都通过 `arigaio/atlas:1.3.0-community` 固定开源 Atlas CLI；Atlas Go 引擎和 GORM Provider 仍固定在 `go.mod`。
 
 Community 配置仅用于生成和应用版本化迁移，以及比较已应用数据库与生成的 GORM schema；本项目不把高级迁移 lint、回滚、迁移测试、审批策略或高级数据库对象治理视为 Community 能力。应用前必须审查每一份生成的 SQL 迁移。
 
@@ -100,7 +114,7 @@ DELETE /api/v1/products/:id
 
 默认包含 request ID、JSON `slog`、panic recover、1 MiB body 限制、15 秒请求超时、安全头、可配置 CORS、标准 `http.Server` 超时和 10 秒优雅停机，并提供 `/health/live`、`/health/ready`、`/openapi.json`、`/docs`。
 
-PostgreSQL 连接池默认最多 25 个连接、25 个空闲连接，连接最长存活 30 分钟、最长空闲 5 分钟；可通过 `DB_MAX_OPEN_CONNS`、`DB_MAX_IDLE_CONNS`、`DB_CONN_MAX_LIFETIME` 和 `DB_CONN_MAX_IDLE_TIME` 覆盖。启动时会在 `DB_CONNECT_TIMEOUT`（默认 5 秒）内执行数据库探测，失败则拒绝启动；停机时显式关闭连接池。
+PostgreSQL 连接池默认最多 25 个连接、25 个空闲连接，连接最长存活 30 分钟、最长空闲 5 分钟；可通过 `DB_MAX_OPEN_CONNS`、`DB_MAX_IDLE_CONNS`、`DB_CONN_MAX_LIFETIME` 和 `DB_CONN_MAX_IDLE_TIME` 覆盖。启动时会在 `DB_CONNECT_TIMEOUT`（默认 5 秒）内执行数据库探测，失败则拒绝启动；停机时按逆序关闭已选择的客户端。
 
 生产启动绝不调用 `AutoMigrate`。SQLite 的 `AutoMigrate` 只用于本地契约快测；CI 先把经过审查的 Atlas SQL 迁移应用到 PostgreSQL，再复跑相同契约。
 
@@ -114,9 +128,9 @@ go tool govulncheck ./...
 
 端到端测试会执行新建项目、添加多个资源、重新生成、漂移检查、所有字段类型编译和五接口契约。
 
-## v0.1.0 不包含
+## 当前不包含
 
-登录、JWT、RBAC、软删除、关联建模、MySQL、Redis、任务队列、文件上传和管理端前端。
+已创建项目中更换 provider、第二种 ORM、密码登录、刷新令牌、RBAC、软删除、关联建模、MySQL、自动 CRUD 缓存、NATS/JetStream 拓扑、文件上传和管理端前端。
 
 ## License
 

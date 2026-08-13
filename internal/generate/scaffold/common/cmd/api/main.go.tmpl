@@ -1,0 +1,154 @@
+package main
+
+import (
+	"context"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+{{if .Options.IsEcho}}
+	"errors"
+	"net/http"
+{{end}}
+
+	"{{.Module}}/internal/app"
+	"{{.Module}}/internal/platform/config"
+	"{{.Module}}/internal/platform/database"
+	"{{.Module}}/internal/platform/logging"
+{{if .Options.HasJWT}}	"{{.Module}}/internal/platform/auth"
+{{end}}{{if .Options.HasRedis}}	"{{.Module}}/internal/platform/cache"
+{{end}}{{if .Options.HasNATS}}	"{{.Module}}/internal/platform/messaging"
+{{end}})
+
+func main() { os.Exit(run()) }
+
+func run() (exitCode int) {
+	logger, flush, err := logging.New()
+	if err != nil {
+		_, _ = os.Stderr.WriteString("logger initialization failed\n")
+		return 1
+	}
+	slog.SetDefault(logger)
+	defer func() {
+		if err := flush(); err != nil {
+			logger.Error("log flush failed", "error", err)
+			exitCode = 1
+		}
+	}()
+
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(signals)
+
+	cfg, err := config.Load()
+	if err != nil {
+		logger.Error("invalid configuration", "error", err)
+		return 1
+	}
+{{if .Options.IsPostgres}}	startupContext, cancelStartup := context.WithTimeout(context.Background(), cfg.DatabaseConnectTimeout)
+	connection, err := database.Open(startupContext, cfg.DatabaseURL, database.PoolOptions{
+		MaxOpenConnections:    cfg.DatabaseMaxOpenConnections,
+		MaxIdleConnections:    cfg.DatabaseMaxIdleConnections,
+		ConnectionMaxLifetime: cfg.DatabaseConnectionMaxLifetime,
+		ConnectionMaxIdleTime: cfg.DatabaseConnectionMaxIdleTime,
+	})
+	cancelStartup()
+{{else}}	startupContext, cancelStartup := context.WithTimeout(context.Background(), cfg.DatabaseConnectTimeout)
+	connection, err := database.Open(startupContext, cfg.DatabasePath)
+	cancelStartup()
+{{end}}	if err != nil {
+		logger.Error("database connection failed", "error", err)
+		return 1
+	}
+	defer func() {
+		if err := connection.Close(); err != nil {
+			logger.Error("database close failed", "error", err)
+			exitCode = 1
+		}
+	}()
+{{if .Options.HasRedis}}
+	redisContext, cancelRedis := context.WithTimeout(context.Background(), cfg.RedisConnectTimeout)
+	redisClient, err := cache.Open(redisContext, cfg.RedisURL)
+	cancelRedis()
+	if err != nil {
+		logger.Error("redis connection failed", "error", err)
+		return 1
+	}
+	defer func() {
+		if err := redisClient.Close(); err != nil {
+			logger.Error("redis close failed", "error", err)
+			exitCode = 1
+		}
+	}()
+{{end}}{{if .Options.HasNATS}}
+	natsConn, err := messaging.Connect(cfg.NATSURL, cfg.NATSConnectTimeout, cfg.NATSFlushTimeout, cfg.NATSDrainTimeout)
+	if err != nil {
+		logger.Error("nats connection failed", "error", err)
+		return 1
+	}
+	defer func() {
+		if err := messaging.Drain(natsConn, cfg.NATSDrainTimeout); err != nil {
+			logger.Error("nats drain failed", "error", err)
+			exitCode = 1
+		}
+	}()
+{{end}}{{if .Options.HasJWT}}
+	verifier, err := auth.NewVerifier(cfg.AuthJWTSecret, cfg.AuthJWTIssuer, cfg.AuthJWTAudience, cfg.AuthJWTLeeway)
+	if err != nil {
+		logger.Error("jwt verifier construction failed", "error", err)
+		return 1
+	}
+{{end}}
+{{if .Options.IsEcho}}	handler := app.New(cfg, connection.ORM, logger{{if .Options.HasJWT}}, verifier{{end}}{{if .Options.HasRedis}}, redisClient{{end}}{{if .Options.HasNATS}}, natsConn{{end}})
+	server := &http.Server{
+		Addr:              cfg.Address,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       20 * time.Second,
+		WriteTimeout:      20 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	serverErrors := make(chan error, 1)
+	go func() {
+		logger.Info("server starting", "address", cfg.Address)
+		serverErrors <- server.ListenAndServe()
+	}()
+	select {
+	case sig := <-signals:
+		logger.Info("shutdown requested", "signal", sig.String())
+	case err := <-serverErrors:
+		if !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("server stopped", "error", err)
+			exitCode = 1
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		logger.Error("graceful shutdown failed", "error", err)
+		exitCode = 1
+	}
+{{else}}	fiberApp := app.New(cfg, connection.ORM, logger{{if .Options.HasJWT}}, verifier{{end}}{{if .Options.HasRedis}}, redisClient{{end}}{{if .Options.HasNATS}}, natsConn{{end}})
+	serverErrors := make(chan error, 1)
+	go func() {
+		logger.Info("server starting", "address", cfg.Address)
+		serverErrors <- fiberApp.Listen(cfg.Address)
+	}()
+	select {
+	case sig := <-signals:
+		logger.Info("shutdown requested", "signal", sig.String())
+	case err := <-serverErrors:
+		if err != nil {
+			logger.Error("server stopped", "error", err)
+			exitCode = 1
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := fiberApp.ShutdownWithContext(ctx); err != nil {
+		logger.Error("graceful shutdown failed", "error", err)
+		exitCode = 1
+	}
+{{end}}	return exitCode
+}

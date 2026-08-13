@@ -18,14 +18,19 @@ import (
 type resourceData struct {
 	Module   string
 	Resource spec.Resource
+	Options  ProjectOptions
 }
 
 type allResourcesData struct {
 	Module    string
 	Resources []spec.Resource
+	Options   ProjectOptions
 }
 
-func renderGenerated(modulePath string, resources []spec.Resource) (map[string][]byte, error) {
+func renderGenerated(modulePath string, resources []spec.Resource, opts ProjectOptions) (map[string][]byte, error) {
+	if err := opts.Validate(); err != nil {
+		return nil, err
+	}
 	files := make(map[string][]byte)
 	resourceTemplates := []struct {
 		name string
@@ -34,11 +39,11 @@ func renderGenerated(modulePath string, resources []spec.Resource) (map[string][
 		{"model_gen.go", modelTemplate},
 		{"dto_gen.go", dtoTemplate},
 		{"store_gen.go", storeTemplate},
-		{"http_gen.go", httpTemplate},
-		{"contract_gen_test.go", contractTemplate},
+		{"http_gen.go", httpTemplateFor(opts)},
+		{"contract_gen_test.go", contractTemplateFor(opts)},
 	}
 	for _, resource := range resources {
-		data := resourceData{Module: modulePath, Resource: resource}
+		data := resourceData{Module: modulePath, Resource: resource, Options: opts}
 		for _, item := range resourceTemplates {
 			output, err := executeGoTemplate(item.name, item.body, data)
 			if err != nil {
@@ -47,9 +52,9 @@ func renderGenerated(modulePath string, resources []spec.Resource) (map[string][
 			files["internal/resources/"+resource.Package+"/"+item.name] = output
 		}
 	}
-	all := allResourcesData{Module: modulePath, Resources: resources}
+	all := allResourcesData{Module: modulePath, Resources: resources, Options: opts}
 	for name, body := range map[string]string{
-		"internal/generated/register_gen.go": registerTemplate,
+		"internal/generated/register_gen.go": registerTemplateFor(opts),
 		"tools/gormschema/main_gen.go":       gormSchemaTemplate,
 		"openapi/embed_gen.go":               openAPIEmbedTemplate,
 	} {
@@ -59,7 +64,7 @@ func renderGenerated(modulePath string, resources []spec.Resource) (map[string][
 		}
 		files[name] = output
 	}
-	document, err := buildOpenAPI(resources)
+	document, err := buildOpenAPI(resources, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -75,14 +80,17 @@ func renderGenerated(modulePath string, resources []spec.Resource) (map[string][
 }
 
 func executeGoTemplate(name, body string, data any) ([]byte, error) {
+	opts := optionsFrom(data)
 	functions := template.FuncMap{
-		"baseType":              baseGoType,
-		"modelType":             modelGoType,
-		"modelImports":          modelImports,
-		"dtoImports":            dtoImports,
-		"hasDTOImports":         func(r spec.Resource) bool { return dtoImports(r) != "" },
-		"gormTag":               gormTag,
-		"fieldStructTag":        fieldStructTag,
+		"baseType":      baseGoType,
+		"modelType":     modelGoType,
+		"modelImports":  modelImports,
+		"dtoImports":    dtoImports,
+		"hasDTOImports": func(r spec.Resource) bool { return dtoImports(r) != "" },
+		"gormTag":       func(field spec.Field) string { return gormTag(opts, field) },
+		"fieldStructTag": func(field spec.Field) string {
+			return strconv.Quote(fmt.Sprintf(`json:"%s" gorm:"%s"`, field.Name, gormTag(opts, field)))
+		},
 		"quote":                 strconv.Quote,
 		"lower":                 strings.ToLower,
 		"searchColumns":         searchColumns,
@@ -125,6 +133,38 @@ func executeGoTemplate(name, body string, data any) ([]byte, error) {
 		return nil, fmt.Errorf("go/format: %w\n%s", err, output.String())
 	}
 	return formatted, nil
+}
+
+func optionsFrom(data any) ProjectOptions {
+	switch value := data.(type) {
+	case resourceData:
+		return value.Options
+	case allResourcesData:
+		return value.Options
+	default:
+		return DefaultProjectOptions()
+	}
+}
+
+func httpTemplateFor(opts ProjectOptions) string {
+	if opts.IsFiber() {
+		return httpTemplateFiber
+	}
+	return httpTemplate
+}
+
+func contractTemplateFor(opts ProjectOptions) string {
+	if opts.IsFiber() {
+		return contractTemplateFiber
+	}
+	return contractTemplate
+}
+
+func registerTemplateFor(opts ProjectOptions) string {
+	if opts.IsFiber() {
+		return registerTemplateFiber
+	}
+	return registerTemplate
 }
 
 func baseGoType(field spec.Field) string {
@@ -205,7 +245,7 @@ func hasType(resource spec.Resource, fieldType spec.FieldType) bool {
 	return false
 }
 
-func gormTag(field spec.Field) string {
+func gormTag(opts ProjectOptions, field spec.Field) string {
 	parts := []string{"column:" + field.Column}
 	switch field.Type {
 	case spec.TypeString:
@@ -217,9 +257,17 @@ func gormTag(field spec.Field) string {
 	case spec.TypeDecimal:
 		parts = append(parts, "type:numeric")
 	case spec.TypeUUID:
-		parts = append(parts, "type:uuid")
+		if opts.IsSQLite() {
+			parts = append(parts, "type:text")
+		} else {
+			parts = append(parts, "type:uuid")
+		}
 	case spec.TypeJSON:
-		parts = append(parts, "type:jsonb")
+		if opts.IsSQLite() {
+			parts = append(parts, "type:json")
+		} else {
+			parts = append(parts, "type:jsonb")
+		}
 	}
 	if !field.Nullable {
 		parts = append(parts, "not null")
@@ -233,10 +281,6 @@ func gormTag(field spec.Field) string {
 		parts = append(parts, "default:"+defaultTagValue(field.Type, field.Default))
 	}
 	return strings.Join(parts, ";")
-}
-
-func fieldStructTag(field spec.Field) string {
-	return strconv.Quote(fmt.Sprintf(`json:"%s" gorm:"%s"`, field.Name, gormTag(field)))
 }
 
 func defaultTagValue(fieldType spec.FieldType, value any) string {
@@ -682,8 +726,8 @@ package {{.Resource.Package}}
 
 import (
 	"context"
-	"database/sql"
-	"fmt"
+{{if .Options.IsPostgres}}	"database/sql"
+{{end}}	"fmt"
 	"strings"
 	"time"
 
@@ -729,7 +773,7 @@ func (s store) list(ctx context.Context, filters filters) ([]{{.Resource.Name}},
 {{end}}	}
 		for _, order := range orders { db = db.Order(order) }
 		return db.Offset((filters.page-1)*filters.pageSize).Limit(filters.pageSize).Find(&items).Error
-	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	}{{if .Options.IsPostgres}}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}{{end}})
 		return items, total, err
 }
 
@@ -835,7 +879,7 @@ func (h handler) get(c *echo.Context) error {
 
 func (h handler) create(c *echo.Context) error {
 	var input Create{{.Resource.Name}}Input
-	if err := httpx.DecodeJSON(c.Request(), &input); err != nil { return httpx.WriteError(c, apperror.BadRequest("invalid_json", "request body must be valid JSON")) }
+	if err := httpx.DecodeJSON(c.Request().Body, &input); err != nil { return httpx.WriteError(c, apperror.BadRequest("invalid_json", "request body must be valid JSON")) }
 	values, details := createValues(input)
 	if len(details) > 0 { return httpx.WriteError(c, apperror.Validation(details)) }
 	item, err := h.store.create(c.Request().Context(), values)
@@ -846,7 +890,7 @@ func (h handler) create(c *echo.Context) error {
 func (h handler) update(c *echo.Context) error {
 	id, err := parseID(c.Param("id")); if err != nil { return httpx.WriteError(c, err) }
 	var input Update{{.Resource.Name}}Input
-	if err := httpx.DecodeJSON(c.Request(), &input); err != nil { return httpx.WriteError(c, apperror.BadRequest("invalid_json", "request body must be valid JSON")) }
+	if err := httpx.DecodeJSON(c.Request().Body, &input); err != nil { return httpx.WriteError(c, apperror.BadRequest("invalid_json", "request body must be valid JSON")) }
 	values, details := updateValues(input)
 	if len(details) > 0 { return httpx.WriteError(c, apperror.Validation(details)) }
 	if len(values) == 0 { return httpx.WriteError(c, apperror.BadRequest("empty_update", "at least one field must be provided")) }
@@ -879,8 +923,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-{{if hasDefaults .Resource}}	"reflect"
+{{if .Options.IsPostgres}}	"os"
+{{end}}{{if hasDefaults .Resource}}	"reflect"
 {{end}}	"strconv"
 	"strings"
 	"testing"
@@ -888,8 +932,8 @@ import (
 
 	"github.com/labstack/echo/v5"
 	"github.com/libtnb/sqlite"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
+{{if .Options.IsPostgres}}	"gorm.io/driver/postgres"
+{{end}}	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 )
 
@@ -897,13 +941,15 @@ func TestGenerated{{.Resource.Name}}CRUDContract(t *testing.T) {
 	config := &gorm.Config{TranslateError: true, NowFunc: func() time.Time { return time.Now().UTC() }, Logger: gormlogger.Default.LogMode(gormlogger.Silent)}
 	var db *gorm.DB
 	var err error
-	if dsn := os.Getenv("TEST_DATABASE_URL"); dsn != "" {
+{{if .Options.IsPostgres}}	if dsn := os.Getenv("TEST_DATABASE_URL"); dsn != "" {
 		db, err = gorm.Open(postgres.Open(dsn), config)
 	} else {
 		db, err = gorm.Open(sqlite.Open(":memory:"), config)
 		if err == nil { err = db.AutoMigrate(&{{.Resource.Name}}{}) }
 	}
-	if err != nil { t.Fatal(err) }
+{{else}}	db, err = gorm.Open(sqlite.Open(":memory:"), config)
+	if err == nil { err = db.AutoMigrate(&{{.Resource.Name}}{}) }
+{{end}}	if err != nil { t.Fatal(err) }
 	e := echo.New()
 	Register(e.Group("/api/v1"), db)
 	basePath := "/api/v1{{.Resource.Route}}"
@@ -1116,7 +1162,7 @@ import (
 
 func main() {
 	models := []any{ {{range .Resources}}&{{.Package}}.{{.Name}}{},{{end}} }
-	statements, err := gormschema.New("postgres").Load(models...)
+	statements, err := gormschema.New("{{if .Options.IsPostgres}}postgres{{else}}sqlite{{end}}").Load(models...)
 	if err != nil { fmt.Fprintln(os.Stderr, err); os.Exit(1) }
 	fmt.Print(statements)
 }

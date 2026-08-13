@@ -1,0 +1,136 @@
+package config
+
+import (
+	"strings"
+	"testing"
+	"time"
+)
+
+func lookup(values map[string]string) envLookup {
+	return func(name string) string { return values[name] }
+}
+
+func withBase(values map[string]string) map[string]string {
+	merged := map[string]string{"DATABASE_URL": "postgres://example"}
+{{if .Options.HasRedis}}	merged["REDIS_URL"] = "redis://127.0.0.1:6379/0"
+{{end}}{{if .Options.HasNATS}}	merged["NATS_URL"] = "nats://127.0.0.1:4222"
+{{end}}{{if .Options.HasJWT}}	merged["AUTH_JWT_SECRET_B64"] = "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE="
+	merged["AUTH_JWT_ISSUER"] = "test-issuer"
+	merged["AUTH_JWT_AUDIENCE"] = "test-audience"
+{{end}}	for key, value := range values {
+		merged[key] = value
+	}
+	return merged
+}
+
+func TestLoadDatabaseDefaults(t *testing.T) {
+	cfg, err := load(lookup(withBase(nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DatabaseMaxOpenConnections != 25 || cfg.DatabaseMaxIdleConnections != 25 {
+		t.Fatalf("pool counts = %d/%d", cfg.DatabaseMaxOpenConnections, cfg.DatabaseMaxIdleConnections)
+	}
+	if cfg.DatabaseConnectionMaxLifetime != 30*time.Minute || cfg.DatabaseConnectionMaxIdleTime != 5*time.Minute {
+		t.Fatalf("pool durations = %s/%s", cfg.DatabaseConnectionMaxLifetime, cfg.DatabaseConnectionMaxIdleTime)
+	}
+	if cfg.DatabaseConnectTimeout != 5*time.Second {
+		t.Fatalf("connect timeout = %s", cfg.DatabaseConnectTimeout)
+	}
+}
+
+func TestLoadDatabaseOverrides(t *testing.T) {
+	cfg, err := load(lookup(withBase(map[string]string{
+		"DB_MAX_OPEN_CONNS":     "12",
+		"DB_MAX_IDLE_CONNS":     "4",
+		"DB_CONN_MAX_LIFETIME":  "45m",
+		"DB_CONN_MAX_IDLE_TIME": "90s",
+		"DB_CONNECT_TIMEOUT":    "3s",
+	})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DatabaseMaxOpenConnections != 12 || cfg.DatabaseMaxIdleConnections != 4 ||
+		cfg.DatabaseConnectionMaxLifetime != 45*time.Minute ||
+		cfg.DatabaseConnectionMaxIdleTime != 90*time.Second ||
+		cfg.DatabaseConnectTimeout != 3*time.Second {
+		t.Fatalf("unexpected overrides: %+v", cfg)
+	}
+}
+
+func TestLoadRejectsInvalidDatabaseSettings(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+		want  string
+	}{
+		{"open syntax", "DB_MAX_OPEN_CONNS", "many", "DB_MAX_OPEN_CONNS must be an integer"},
+		{"open zero", "DB_MAX_OPEN_CONNS", "0", "DB_MAX_OPEN_CONNS must be greater than zero"},
+		{"idle negative", "DB_MAX_IDLE_CONNS", "-1", "DB_MAX_IDLE_CONNS cannot be negative"},
+		{"lifetime negative", "DB_CONN_MAX_LIFETIME", "-1s", "DB_CONN_MAX_LIFETIME cannot be negative"},
+		{"idle duration syntax", "DB_CONN_MAX_IDLE_TIME", "later", "DB_CONN_MAX_IDLE_TIME must be a Go duration"},
+		{"connect zero", "DB_CONNECT_TIMEOUT", "0", "DB_CONNECT_TIMEOUT must be greater than zero"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			values := withBase(map[string]string{test.key: test.value})
+			_, err := load(lookup(values))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsIdleConnectionsAboveOpenLimit(t *testing.T) {
+	_, err := load(lookup(withBase(map[string]string{
+		"DB_MAX_OPEN_CONNS": "5",
+		"DB_MAX_IDLE_CONNS": "6",
+	})))
+	if err == nil || !strings.Contains(err.Error(), "DB_MAX_IDLE_CONNS cannot exceed DB_MAX_OPEN_CONNS") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLoadRequiresDatabaseURL(t *testing.T) {
+	_, err := load(lookup(withBase(map[string]string{"DATABASE_URL": ""})))
+	if err == nil || !strings.Contains(err.Error(), "DATABASE_URL is required") {
+		t.Fatalf("error = %v", err)
+	}
+}
+{{if .Options.HasRedis}}
+func TestLoadRequiresRedisURL(t *testing.T) {
+	_, err := load(lookup(withBase(map[string]string{"REDIS_URL": ""})))
+	if err == nil || !strings.Contains(err.Error(), "REDIS_URL is required") {
+		t.Fatalf("error = %v", err)
+	}
+}
+{{end}}{{if .Options.HasNATS}}
+func TestLoadRequiresNATSURL(t *testing.T) {
+	_, err := load(lookup(withBase(map[string]string{"NATS_URL": ""})))
+	if err == nil || !strings.Contains(err.Error(), "NATS_URL is required") {
+		t.Fatalf("error = %v", err)
+	}
+}
+{{end}}{{if .Options.HasJWT}}
+func TestLoadRequiresJWTSettings(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		want string
+	}{
+		{"secret", "AUTH_JWT_SECRET_B64", "AUTH_JWT_SECRET_B64 is required"},
+		{"issuer", "AUTH_JWT_ISSUER", "AUTH_JWT_ISSUER is required"},
+		{"audience", "AUTH_JWT_AUDIENCE", "AUTH_JWT_AUDIENCE is required"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := load(lookup(withBase(map[string]string{test.key: ""})))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+{{end}}

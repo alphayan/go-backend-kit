@@ -1,0 +1,35 @@
+package httpx
+
+import (
+	"net/http"
+	"strings"
+
+	"{{.Module}}/internal/platform/apperror"
+	"github.com/gofiber/fiber/v3"
+	"github.com/gofiber/fiber/v3/middleware/requestid"
+)
+
+func WriteData[T any](c fiber.Ctx, status int, data T) error {
+	return c.Status(status).JSON(Data[T]{Data: data})
+}
+
+func WriteError(c fiber.Ctx, err error) error {
+	public := apperror.Public(err)
+	if e, ok := err.(*fiber.Error); ok {
+		message := http.StatusText(e.Code)
+		code := strings.ToLower(strings.ReplaceAll(message, " ", "_"))
+		if code == "" {
+			code = "http_error"
+			message = "request failed"
+		}
+		public = &apperror.Error{Status: e.Code, Code: code, Message: message}
+	}
+	if public.Status == http.StatusUnauthorized {
+		c.Set("WWW-Authenticate", "Bearer")
+	}
+	requestID := requestid.FromContext(c)
+	if requestID == "" {
+		requestID = c.Get("X-Request-ID")
+	}
+	return c.Status(public.Status).JSON(errorBody{Error: errorData{Code: public.Code, Message: public.Message, Details: public.Details, RequestID: requestID}})
+}

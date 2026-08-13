@@ -19,7 +19,7 @@ if [ -z "${DATABASE_URL:-}" ]; then
     -e POSTGRES_DB=kit_test \
     -e POSTGRES_USER=kit \
     -e POSTGRES_PASSWORD=kit \
-    -P postgres:17-alpine)
+    -P postgres:18.4-alpine3.24)
   container=$created_container
   port=$(docker port "$container" 5432/tcp | head -n 1 | awk -F: '{print $NF}')
   DATABASE_URL="postgres://kit:kit@localhost:${port}/kit_test?sslmode=disable"
@@ -38,7 +38,7 @@ fi
 binary="$tmp/gobackend"
 project="$tmp/product-api"
 go build -o "$binary" ./cmd/gobackend
-GOBACKEND_DEVELOPMENT_REPLACE="$root" "$binary" new "$project" --module example.com/product-api
+GOBACKEND_DEVELOPMENT_REPLACE="$root" "$binary" new "$project" --module example.com/product-api --database postgres
 
 cd "$project"
 go tool gobackend add "$root/examples/product.yaml"

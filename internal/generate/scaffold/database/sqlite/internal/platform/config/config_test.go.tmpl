@@ -1,0 +1,97 @@
+package config
+
+import (
+	"strings"
+	"testing"
+	"time"
+)
+
+func lookup(values map[string]string) envLookup {
+	return func(name string) string { return values[name] }
+}
+
+func baseEnv() map[string]string {
+	values := map[string]string{}
+{{if .Options.HasRedis}}	values["REDIS_URL"] = "redis://127.0.0.1:6379/0"
+{{end}}{{if .Options.HasNATS}}	values["NATS_URL"] = "nats://127.0.0.1:4222"
+{{end}}{{if .Options.HasJWT}}	values["AUTH_JWT_SECRET_B64"] = "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE="
+	values["AUTH_JWT_ISSUER"] = "test-issuer"
+	values["AUTH_JWT_AUDIENCE"] = "test-audience"
+{{end}}	return values
+}
+
+func TestLoadSQLiteDefaults(t *testing.T) {
+	cfg, err := load(lookup(baseEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DatabasePath != "data/app.db" {
+		t.Fatalf("path = %q", cfg.DatabasePath)
+	}
+	if cfg.DatabaseConnectTimeout != 5*time.Second {
+		t.Fatalf("connect timeout = %s", cfg.DatabaseConnectTimeout)
+	}
+}
+
+func TestLoadSQLiteOverrides(t *testing.T) {
+	values := baseEnv()
+	values["DATABASE_PATH"] = "tmp/custom.db"
+	values["DB_CONNECT_TIMEOUT"] = "3s"
+	cfg, err := load(lookup(values))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DatabasePath != "tmp/custom.db" || cfg.DatabaseConnectTimeout != 3*time.Second {
+		t.Fatalf("unexpected overrides: %+v", cfg)
+	}
+}
+
+func TestLoadRejectsInvalidSQLiteSettings(t *testing.T) {
+	values := baseEnv()
+	values["DB_CONNECT_TIMEOUT"] = "0"
+	_, err := load(lookup(values))
+	if err == nil || !strings.Contains(err.Error(), "DB_CONNECT_TIMEOUT must be greater than zero") {
+		t.Fatalf("error = %v", err)
+	}
+}
+{{if .Options.HasRedis}}
+func TestLoadRequiresRedisURL(t *testing.T) {
+	values := baseEnv()
+	values["REDIS_URL"] = ""
+	_, err := load(lookup(values))
+	if err == nil || !strings.Contains(err.Error(), "REDIS_URL is required") {
+		t.Fatalf("error = %v", err)
+	}
+}
+{{end}}{{if .Options.HasNATS}}
+func TestLoadRequiresNATSURL(t *testing.T) {
+	values := baseEnv()
+	values["NATS_URL"] = ""
+	_, err := load(lookup(values))
+	if err == nil || !strings.Contains(err.Error(), "NATS_URL is required") {
+		t.Fatalf("error = %v", err)
+	}
+}
+{{end}}{{if .Options.HasJWT}}
+func TestLoadRequiresJWTSettings(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		want string
+	}{
+		{"secret", "AUTH_JWT_SECRET_B64", "AUTH_JWT_SECRET_B64 is required"},
+		{"issuer", "AUTH_JWT_ISSUER", "AUTH_JWT_ISSUER is required"},
+		{"audience", "AUTH_JWT_AUDIENCE", "AUTH_JWT_AUDIENCE is required"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			values := baseEnv()
+			values[test.key] = ""
+			_, err := load(lookup(values))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+{{end}}

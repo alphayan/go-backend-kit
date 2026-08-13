@@ -1,0 +1,37 @@
+package messaging
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/nats-io/nats.go"
+)
+
+func Connect(url string, connectTimeout, flushTimeout, drainTimeout time.Duration) (*nats.Conn, error) {
+	conn, err := nats.Connect(url, nats.Timeout(connectTimeout), nats.DrainTimeout(drainTimeout), nats.Name("gobackend"))
+	if err != nil {
+		return nil, fmt.Errorf("connect nats")
+	}
+	if err := conn.FlushTimeout(flushTimeout); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("flush nats: %w", err)
+	}
+	return conn, nil
+}
+
+func Drain(conn *nats.Conn, timeout time.Duration) error {
+	if conn == nil {
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- conn.Drain() }()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		conn.Close()
+		return fmt.Errorf("drain nats: timeout")
+	}
+}

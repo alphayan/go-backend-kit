@@ -1,0 +1,138 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+{{if .Options.IsSQLite}}  sqlite:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ "{{" }} matrix.os {{"}}"}}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: {{.Pins.GoVersion}}
+          cache: true
+      - run: go mod download
+      - run: go tool gobackend check
+      - name: Test with CGO disabled
+        env:
+          CGO_ENABLED: "0"
+        run: go test -race ./...
+      - run: go vet ./...
+      - if: runner.os == 'Linux'
+        run: go tool govulncheck ./...
+{{end}}{{if .Options.IsPostgres}}  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: {{.Pins.PostgresImage}}
+        env:
+          POSTGRES_DB: app_test
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d app_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+{{if .Options.HasRedis}}      redis:
+        image: {{.Pins.RedisImage}}
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+{{end}}{{if .Options.HasNATS}}      nats:
+        image: {{.Pins.NATSImage}}
+        ports:
+          - 4222:4222
+        options: >-
+          --health-cmd "wget -q -O- http://127.0.0.1:8222/healthz"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+{{end}}    env:
+      DATABASE_URL: postgres://app:app@localhost:5432/app_test?sslmode=disable
+      TEST_DATABASE_URL: postgres://app:app@localhost:5432/app_test?sslmode=disable
+{{if .Options.HasRedis}}      TEST_REDIS_URL: redis://127.0.0.1:6379/0
+      REDIS_URL: redis://127.0.0.1:6379/0
+{{end}}{{if .Options.HasNATS}}      TEST_NATS_URL: nats://127.0.0.1:4222
+      NATS_URL: nats://127.0.0.1:4222
+{{end}}    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: {{.Pins.GoVersion}}
+          cache: true
+      - run: go mod download
+      - run: go tool gobackend check
+      - name: Require migrations when resources exist
+        run: |
+          if find resources -type f \( -name '*.yaml' -o -name '*.yml' \) | grep -q . && ! find migrations -type f -name '*.sql' | grep -q .; then
+            echo 'resources exist but no versioned migration was committed'
+            exit 1
+          fi
+      - name: Apply and compare migrations
+        run: |
+          if find migrations -type f -name '*.sql' | grep -q .; then
+            ./scripts/atlas.sh migrate apply --env ci
+            drift=$(./scripts/atlas.sh schema diff --env ci --from env://url --to env://src --exclude atlas_schema_revisions --format '{{"{{"}} sql . "  " {{"}}"}}')
+            if [ -n "$drift" ]; then
+              echo 'applied migrations do not match the generated GORM schema'
+              echo "$drift"
+              exit 1
+            fi
+          fi
+      - name: Test with PostgreSQL
+        run: go test -race ./...
+      - run: go vet ./...
+      - run: go tool govulncheck ./...
+{{end}}{{if and .Options.IsSQLite (or .Options.HasRedis .Options.HasNATS)}}  integration:
+    runs-on: ubuntu-latest
+    services:
+{{if .Options.HasRedis}}      redis:
+        image: {{.Pins.RedisImage}}
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+{{end}}{{if .Options.HasNATS}}      nats:
+        image: {{.Pins.NATSImage}}
+        ports:
+          - 4222:4222
+        options: >-
+          --health-cmd "wget -q -O- http://127.0.0.1:8222/healthz"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+{{end}}    env:
+{{if .Options.HasRedis}}      TEST_REDIS_URL: redis://127.0.0.1:6379/0
+      REDIS_URL: redis://127.0.0.1:6379/0
+{{end}}{{if .Options.HasNATS}}      TEST_NATS_URL: nats://127.0.0.1:4222
+      NATS_URL: nats://127.0.0.1:4222
+{{end}}    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: {{.Pins.GoVersion}}
+          cache: true
+      - run: go mod download
+      - env:
+          CGO_ENABLED: "0"
+        run: go test -race ./...
+{{end}}

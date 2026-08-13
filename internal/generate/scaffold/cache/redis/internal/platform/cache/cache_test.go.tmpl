@@ -1,0 +1,57 @@
+package cache
+
+import (
+	"context"
+	"errors"
+	"os"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestOpenPingClose(t *testing.T) {
+	url := os.Getenv("TEST_REDIS_URL")
+	if url == "" {
+		t.Skip("TEST_REDIS_URL not set")
+	}
+	ctx := t.Context()
+	client, err := Open(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Ping(ctx).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenHonorsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := Open(ctx, "redis://127.0.0.1:6379/0")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+}
+
+func TestOpenFailsWithoutLeakingURL(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	_, err := Open(ctx, "redis://:super-secret@127.0.0.1:1/0")
+	if err == nil {
+		t.Fatal("expected ping failure")
+	}
+	message := err.Error()
+	if strings.Contains(message, "super-secret") || strings.Contains(message, "127.0.0.1") {
+		t.Fatalf("redis error leaked connection details: %v", err)
+	}
+}
+
+func TestOpenRejectsInvalidURL(t *testing.T) {
+	_, err := Open(t.Context(), "://not-a-redis-url")
+	if err == nil || !strings.Contains(err.Error(), "parse redis configuration") {
+		t.Fatalf("error = %v", err)
+	}
+}

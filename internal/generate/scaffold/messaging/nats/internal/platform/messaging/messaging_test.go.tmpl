@@ -1,0 +1,36 @@
+package messaging
+
+import (
+	"os"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestConnectFlushDrain(t *testing.T) {
+	url := os.Getenv("TEST_NATS_URL")
+	if url == "" {
+		t.Skip("TEST_NATS_URL not set")
+	}
+	conn, err := Connect(url, 5*time.Second, 2*time.Second, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.FlushTimeout(2 * time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := Drain(conn, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConnectFailsWithoutLeakingURL(t *testing.T) {
+	_, err := Connect("nats://user:super-secret@127.0.0.1:1", 200*time.Millisecond, 200*time.Millisecond, time.Second)
+	if err == nil {
+		t.Fatal("expected connect failure")
+	}
+	message := err.Error()
+	if strings.Contains(message, "super-secret") || strings.Contains(message, "127.0.0.1") {
+		t.Fatalf("nats error leaked connection details: %v", err)
+	}
+}

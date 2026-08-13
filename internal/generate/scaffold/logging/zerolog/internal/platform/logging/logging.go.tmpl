@@ -1,0 +1,15 @@
+package logging
+
+import (
+	"log/slog"
+	"os"
+
+	"github.com/rs/zerolog"
+	slogzerolog "github.com/samber/slog-zerolog/v2"
+)
+
+func New() (*slog.Logger, func() error, error) {
+	zero := zerolog.New(os.Stdout).With().Timestamp().Logger()
+	logger := slog.New(slogzerolog.Option{Level: slog.LevelInfo, Logger: &zero}.NewZerologHandler())
+	return logger, func() error { return nil }, nil
+}
