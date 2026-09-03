@@ -1,8 +1,6 @@
 module github.com/alphayan/go-backend-kit
 
-go 1.26.4
-
-toolchain go1.26.5
+go 1.27.1
 
 tool golang.org/x/vuln/cmd/govulncheck
 

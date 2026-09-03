@@ -1,0 +1,32 @@
+<script setup lang="ts">
+import { nextTick, ref, watch } from "vue"
+
+const props = defineProps<{ open: boolean; title: string; message: string; busy?: boolean; confirmLabel?: string; error?: string }>()
+const emit = defineEmits<{ confirm: []; cancel: [] }>()
+const dialog = ref<HTMLDialogElement>()
+
+watch(() => props.open, async (open) => {
+  await nextTick()
+  if (open && !dialog.value?.open) dialog.value?.showModal()
+  if (!open && dialog.value?.open) dialog.value.close()
+}, { immediate: true })
+
+function cancel() {
+  if (!props.busy) emit("cancel")
+}
+</script>
+
+<template>
+  <dialog ref="dialog" class="dialog" aria-labelledby="confirm-title" @cancel.prevent="cancel" @close="cancel">
+    <div class="dialog-body">
+      <p class="eyebrow">Please confirm</p>
+      <h2 id="confirm-title" v-text="title" />
+      <p class="muted" v-text="message" />
+      <p v-if="error" class="form-error" role="alert" v-text="error" />
+      <div class="dialog-actions">
+        <button class="button secondary" type="button" :disabled="busy" @click="cancel">Cancel</button>
+        <button class="button danger" type="button" :disabled="busy" @click="emit('confirm')" v-text="busy ? 'Working…' : (confirmLabel ?? 'Delete')" />
+      </div>
+    </div>
+  </dialog>
+</template>

@@ -22,9 +22,15 @@ func TestSelectedScaffoldFilesCoverCombinationsWithoutCollision(t *testing.T) {
 			for _, cache := range []CacheChoice{CacheNone, CacheRedis} {
 				for _, messaging := range []MessagingChoice{MessagingNone, MessagingNATS} {
 					for _, logging := range []LoggingChoice{LoggingSlog, LoggingZap, LoggingZerolog} {
-						for _, auth := range []AuthChoice{AuthNone, AuthJWT} {
+						for _, auth := range []AuthChoice{AuthNone, AuthJWT, AuthSession} {
 							opts.HTTP, opts.Database, opts.Cache = httpChoice, database, cache
 							opts.Messaging, opts.Logging, opts.Auth = messaging, logging, auth
+							if auth == AuthSession && httpChoice == HTTPFiber {
+								if _, err := selectedScaffoldFiles(opts); err == nil {
+									t.Fatalf("selectedScaffoldFiles(%+v) accepted Fiber session auth", opts)
+								}
+								continue
+							}
 							files, err := selectedScaffoldFiles(opts)
 							if err != nil {
 								t.Fatalf("selectedScaffoldFiles(%+v) = %v", opts, err)
@@ -50,10 +56,50 @@ func TestSelectedScaffoldFilesCoverCombinationsWithoutCollision(t *testing.T) {
 							if _, exists := outputs["internal/platform/auth/auth.go"]; exists != opts.HasJWT() {
 								t.Fatalf("jwt package presence = %v, want %v for %+v", exists, opts.HasJWT(), opts)
 							}
+							if _, exists := outputs["internal/platform/auth/password.go"]; exists != opts.HasSession() {
+								t.Fatalf("session package presence = %v, want %v for %+v", exists, opts.HasSession(), opts)
+							}
 						}
 					}
 				}
 			}
+		}
+	}
+}
+
+func TestProductionSelectionAddsOptionalPlatformFiles(t *testing.T) {
+	opts := DefaultProjectOptions()
+	opts.Profile = ProfileProduction
+	files, err := selectedScaffoldFiles(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputs := make(map[string]bool, len(files))
+	for _, file := range files {
+		outputs[file.Output] = true
+	}
+	for _, name := range []string{
+		"Dockerfile",
+		".dockerignore",
+		"docker-compose.yml",
+		"observability/prometheus.yml",
+		"observability/alerts.yml",
+		"observability/grafana/dashboards/backend.json",
+		"internal/platform/observability/observability.go",
+		"internal/platform/observability/observability_test.go",
+	} {
+		if !outputs[name] {
+			t.Errorf("production selection missing %s", name)
+		}
+	}
+	personalFiles, err := selectedScaffoldFiles(DefaultProjectOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range personalFiles {
+		if file.Output == "Dockerfile" || strings.HasPrefix(file.Output, "observability/") ||
+			strings.HasPrefix(file.Output, "internal/platform/observability/") {
+			t.Errorf("personal selection emitted production file %s", file.Output)
 		}
 	}
 }

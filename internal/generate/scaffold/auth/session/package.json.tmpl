@@ -1,0 +1,33 @@
+{
+  "name": "generated-admin",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@{{.Pins.PNPM}}",
+  "engines": {
+    "node": ">={{.Pins.Node}} <25",
+    "pnpm": "{{.Pins.PNPM}}"
+  },
+  "scripts": {
+    "frontend:dev": "vite --config web/vite.config.ts",
+    "frontend:typecheck": "vue-tsc -p web/tsconfig.json --noEmit",
+    "frontend:test": "vitest run --config web/vitest.config.ts",
+    "frontend:build": "pnpm frontend:typecheck && vite build --config web/vite.config.ts",
+    "frontend:e2e": "playwright test --config web/playwright.config.ts"
+  },
+  "dependencies": {
+    "@tanstack/vue-query": "{{.Pins.VueQuery}}",
+    "vue": "{{.Pins.Vue}}",
+    "vue-router": "{{.Pins.VueRouter}}",
+    "zod": "{{.Pins.Zod}}"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "@types/node": "{{.Pins.NodeTypes}}",
+    "@vitejs/plugin-vue": "{{.Pins.ViteVue}}",
+    "@vue/compiler-sfc": "{{.Pins.VueCompiler}}",
+    "typescript": "{{.Pins.TypeScript}}",
+    "vite": "{{.Pins.Vite}}",
+    "vitest": "{{.Pins.Vitest}}",
+    "vue-tsc": "{{.Pins.VueTSC}}"
+  }
+}

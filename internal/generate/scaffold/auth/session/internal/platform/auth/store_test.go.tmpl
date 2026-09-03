@@ -1,0 +1,138 @@
+package auth
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/libtnb/sqlite"
+	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
+)
+
+func TestBootstrapContract(t *testing.T) {
+	db := authTestDB(t)
+	store := NewStore(db)
+	passwords := authTestPasswords(t)
+	if _, _, err := store.Bootstrap(t.Context(), "", "", passwords); err == nil {
+		t.Fatal("empty database bootstrapped without credentials")
+	}
+	created, ignored, err := store.Bootstrap(t.Context(), "Admin@Example.com", "unique bootstrap password", passwords)
+	if err != nil || !created || ignored {
+		t.Fatalf("Bootstrap() = %v, %v, %v", created, ignored, err)
+	}
+	user, err := store.FindUserByEmail(t.Context(), "admin@example.com")
+	if err != nil || user.Role != "admin" || user.PasswordHash == "unique bootstrap password" {
+		t.Fatalf("bootstrap user = %#v, %v", user, err)
+	}
+	created, ignored, err = store.Bootstrap(t.Context(), "other@example.com", "ignored password", passwords)
+	if err != nil || created || !ignored {
+		t.Fatalf("existing Bootstrap() = %v, %v, %v", created, ignored, err)
+	}
+}
+
+func TestSessionExpiryIdleAndLastSeenThrottle(t *testing.T) {
+	db := authTestDB(t)
+	store := NewStore(db)
+	user := authTestUser(t, store, authTestPasswords(t), "admin@example.com", "admin")
+	now := time.Unix(1_700_000_000, 0).UTC()
+	token, err := store.CreateSession(t.Context(), user.ID, "", "agent", "127.0.0.1", time.Hour, now)
+	if err != nil { t.Fatal(err) }
+	if _, err := store.Authenticate(t.Context(), token, now.Add(30*time.Second), 30*time.Minute); err != nil { t.Fatal(err) }
+	var row Session
+	if err := db.Where("user_id = ?", user.ID).Take(&row).Error; err != nil { t.Fatal(err) }
+	if !row.LastSeenAt.Equal(now) {
+		t.Fatalf("last_seen_at updated too early: %s", row.LastSeenAt)
+	}
+	if _, err := store.Authenticate(t.Context(), token, now.Add(61*time.Second), 30*time.Minute); err != nil { t.Fatal(err) }
+	if err := db.Where("id = ?", row.ID).Take(&row).Error; err != nil { t.Fatal(err) }
+	if !row.LastSeenAt.Equal(now.Add(61 * time.Second)) {
+		t.Fatalf("last_seen_at = %s", row.LastSeenAt)
+	}
+	if _, err := store.Authenticate(t.Context(), token, now.Add(2*time.Hour), 30*time.Minute); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("expired session error = %v", err)
+	}
+
+	idleToken, err := store.CreateSession(t.Context(), user.ID, "", "agent", "127.0.0.1", 24*time.Hour, now)
+	if err != nil { t.Fatal(err) }
+	if _, err := store.Authenticate(t.Context(), idleToken, now.Add(31*time.Minute), 30*time.Minute); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("idle session error = %v", err)
+	}
+}
+
+func TestPasswordChangeRotatesAllSessionsAndDisableRevokes(t *testing.T) {
+	db := authTestDB(t)
+	store := NewStore(db)
+	passwords := authTestPasswords(t)
+	user := authTestUser(t, store, passwords, "admin@example.com", "admin")
+	now := time.Now().UTC()
+	first, err := store.CreateSession(t.Context(), user.ID, "", "a", "1", time.Hour, now)
+	if err != nil { t.Fatal(err) }
+	if _, err := store.CreateSession(t.Context(), user.ID, "", "b", "2", time.Hour, now); err != nil { t.Fatal(err) }
+	permit, ok := passwords.TryAcquire()
+	if !ok { t.Fatal("permit unavailable") }
+	replacementHash, err := permit.Hash("replacement password")
+	permit.Release()
+	if err != nil { t.Fatal(err) }
+	replacement, err := store.ChangePasswordAndRotate(t.Context(), user.ID, replacementHash, "new", "3", time.Hour, now)
+	if err != nil { t.Fatal(err) }
+	if _, err := store.Authenticate(t.Context(), first, now, time.Hour); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("old session error = %v", err)
+	}
+	if _, err := store.Authenticate(t.Context(), replacement, now, time.Hour); err != nil { t.Fatal(err) }
+	var count int64
+	if err := db.Model(&Session{}).Where("user_id = ?", user.ID).Count(&count).Error; err != nil { t.Fatal(err) }
+	if count != 1 { t.Fatalf("sessions after rotation = %d", count) }
+	if err := store.DisableUser(t.Context(), user.ID, now); err != nil { t.Fatal(err) }
+	if _, err := store.Authenticate(t.Context(), replacement, now, time.Hour); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("disabled session error = %v", err)
+	}
+}
+
+func TestSessionSweeperStopsWithOwnerContext(t *testing.T) {
+	db := authTestDB(t)
+	store := NewStore(db)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		store.SweepExpired(ctx, time.Millisecond, func(err error) { t.Errorf("sweep error: %v", err) })
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("sweeper did not stop after cancellation")
+	}
+}
+
+func authTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:?_pragma=foreign_keys(1)"), &gorm.Config{Logger: gormlogger.Default.LogMode(gormlogger.Silent)})
+	if err != nil { t.Fatal(err) }
+	sqlDB, err := db.DB()
+	if err != nil { t.Fatal(err) }
+	sqlDB.SetMaxOpenConns(1)
+	if err := db.AutoMigrate(&User{}, &Session{}, &AuditLog{}); err != nil { t.Fatal(err) }
+	return db
+}
+
+func authTestPasswords(t *testing.T) *PasswordManager {
+	t.Helper()
+	manager, err := NewPasswordManager(DefaultPasswordParams(), 2)
+	if err != nil { t.Fatal(err) }
+	return manager
+}
+
+func authTestUser(t *testing.T, store *Store, passwords *PasswordManager, email, role string) User {
+	t.Helper()
+	permit, ok := passwords.TryAcquire()
+	if !ok { t.Fatal("permit unavailable") }
+	hash, err := permit.Hash("correct horse battery staple")
+	permit.Release()
+	if err != nil { t.Fatal(err) }
+	user, err := store.CreateUser(t.Context(), email, hash, role)
+	if err != nil { t.Fatal(err) }
+	return user
+}

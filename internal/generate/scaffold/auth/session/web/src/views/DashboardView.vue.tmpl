@@ -1,0 +1,39 @@
+<script setup lang="ts">
+import { RouterLink } from "vue-router"
+import { resources } from "@/generated/registry_gen"
+import { useAuth } from "@/lib/auth"
+
+const { identity } = useAuth()
+</script>
+
+<template>
+  <div class="page-stack">
+    <header class="page-header hero-header">
+      <div>
+        <p class="eyebrow">Workspace overview</p>
+        <h1>Good to see you.</h1>
+        <p class="page-lead"><span v-text="identity?.email" /> is signed in with the <strong v-text="identity?.role" /> role.</p>
+      </div>
+      <RouterLink class="button secondary" :to="{ name: 'account' }">Account security</RouterLink>
+    </header>
+
+    <section aria-labelledby="resources-title">
+      <div class="section-heading">
+        <div><p class="eyebrow">Data</p><h2 id="resources-title">Resources</h2></div>
+        <span class="count-badge" v-text="resources.length" />
+      </div>
+      <div v-if="resources.length > 0" class="resource-grid">
+        <RouterLink v-for="(resource, index) in resources" :key="resource.key" class="resource-card" :to="{ name: 'resource', params: { resource: resource.key } }">
+          <span class="resource-number" v-text="String(index + 1).padStart(2, '0')" />
+          <div><h3 v-text="resource.name" /><p v-text="`${resource.fields.length} managed fields`" /></div>
+          <span class="card-arrow" aria-hidden="true">→</span>
+        </RouterLink>
+      </div>
+      <div v-else class="empty-state">
+        <span class="empty-glyph" aria-hidden="true">◇</span>
+        <h3>No resources generated yet</h3>
+        <p>Add a resource YAML and run <code>go tool gobackend generate</code>. The route will appear here automatically.</p>
+      </div>
+    </section>
+  </div>
+</template>

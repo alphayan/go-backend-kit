@@ -1,0 +1,37 @@
+import { afterEach, describe, expect, it, vi } from "vitest"
+import { APIError, apiRequest, messageFor } from "./api"
+
+afterEach(() => vi.unstubAllGlobals())
+
+describe("apiRequest", () => {
+  it("unwraps data and sends same-origin credentials", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: { id: 7 } }), { status: 200 }))
+    vi.stubGlobal("fetch", fetchMock)
+
+    await expect(apiRequest<{ id: number }>("/api/v1/things")).resolves.toEqual({ id: 7 })
+    expect(fetchMock).toHaveBeenCalledWith("/api/v1/things", expect.objectContaining({ credentials: "same-origin" }))
+  })
+
+  it("preserves field details and request id", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: { code: "validation_failed", message: "invalid", details: { name: "required" }, request_id: "req-1" },
+    }), { status: 422 })))
+
+    const error = await apiRequest("/api/v1/things").catch((reason: unknown) => reason)
+    expect(error).toBeInstanceOf(APIError)
+    expect((error as APIError).details).toEqual({ name: "required" })
+    expect(messageFor(error)).toContain("req-1")
+  })
+
+  it("accepts an empty 204 response", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 204 })))
+    await expect(apiRequest<void>("/auth/logout", { method: "POST" })).resolves.toBeUndefined()
+  })
+
+  it("rejects malformed success JSON instead of returning an unchecked value", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("not-json", { status: 200 })))
+    const error = await apiRequest("/api/v1/things").catch((reason: unknown) => reason)
+    expect(error).toBeInstanceOf(APIError)
+    expect((error as APIError).code).toBe("invalid_response")
+  })
+})

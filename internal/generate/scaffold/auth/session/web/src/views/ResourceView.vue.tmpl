@@ -1,0 +1,171 @@
+<script setup lang="ts">
+import { computed, nextTick, reactive, ref, watch } from "vue"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query"
+import { useRoute, useRouter } from "vue-router"
+import ConfirmDialog from "@/components/ConfirmDialog.vue"
+import DataTable from "@/components/DataTable.vue"
+import FormShell from "@/components/FormShell.vue"
+import { resources } from "@/generated/registry_gen"
+import { APIError, apiRequest, messageFor, type Page } from "@/lib/api"
+import { useAuth } from "@/lib/auth"
+import type { ResourceRecord } from "@/lib/resource"
+
+const route = useRoute()
+const router = useRouter()
+const queryClient = useQueryClient()
+const { identity } = useAuth()
+const resource = computed(() => resources.find((candidate) => candidate.key === route.params.resource))
+const page = ref(1)
+const search = ref("")
+const committedSearch = ref("")
+const sort = ref("")
+const filters = reactive<Record<string, string>>({})
+const formDialog = ref<HTMLDialogElement>()
+const formMode = ref<"create" | "update">("create")
+const selected = ref<ResourceRecord>()
+const pendingDelete = ref<ResourceRecord>()
+const announcement = ref("")
+const mutationError = ref<unknown>()
+const canWrite = computed(() => identity.value?.role === "admin")
+
+function handleMutationError(error: unknown) {
+  mutationError.value = error
+  announcement.value = messageFor(error)
+  if (error instanceof APIError && error.status === 401) window.dispatchEvent(new Event("auth:expired"))
+}
+
+watch(resource, (value) => {
+  if (value === undefined) void router.replace({ name: "not-found" })
+  page.value = 1
+  search.value = ""
+  committedSearch.value = ""
+  sort.value = ""
+  for (const key of Object.keys(filters)) delete filters[key]
+}, { immediate: true })
+
+const queryKey = computed(() => ["resource", resource.value?.key, page.value, committedSearch.value, sort.value, { ...filters }])
+const records = useQuery({
+  queryKey,
+  enabled: computed(() => resource.value !== undefined),
+  queryFn: async () => {
+    const current = resource.value
+    if (current === undefined) throw new Error("Unknown resource")
+    const params = new URLSearchParams({ page: String(page.value), page_size: "20" })
+    if (committedSearch.value !== "") params.set("q", committedSearch.value)
+    if (sort.value !== "") params.set("sort", sort.value)
+    for (const [key, value] of Object.entries(filters)) if (value !== "") params.set(key, value)
+    return apiRequest<Page<ResourceRecord>>(`${current.apiPath}?${params}`)
+  },
+})
+
+const save = useMutation({
+  mutationFn: async (payload: Record<string, unknown>) => {
+    const current = resource.value
+    if (current === undefined) throw new Error("Unknown resource")
+    const updating = formMode.value === "update" && selected.value !== undefined
+    return apiRequest<ResourceRecord>(updating ? `${current.apiPath}/${selected.value?.id}` : current.apiPath, {
+      method: updating ? "PATCH" : "POST",
+      body: JSON.stringify(payload),
+    })
+  },
+  onSuccess: async () => {
+    closeForm()
+    announcement.value = formMode.value === "create" ? "Record created." : "Record updated."
+    await queryClient.invalidateQueries({ queryKey: ["resource", resource.value?.key] })
+  },
+  onError: handleMutationError,
+})
+
+const remove = useMutation({
+  mutationFn: async (record: ResourceRecord) => {
+    const current = resource.value
+    if (current === undefined) throw new Error("Unknown resource")
+    return apiRequest<void>(`${current.apiPath}/${record.id}`, { method: "DELETE" })
+  },
+  onSuccess: async () => {
+    pendingDelete.value = undefined
+    announcement.value = "Record deleted."
+    await queryClient.invalidateQueries({ queryKey: ["resource", resource.value?.key] })
+  },
+  onError: handleMutationError,
+})
+
+watch(() => records.error.value, (error) => {
+  if (error instanceof APIError && error.status === 401) window.dispatchEvent(new Event("auth:expired"))
+})
+
+async function openForm(mode: "create" | "update", record?: ResourceRecord) {
+  formMode.value = mode
+  selected.value = record
+  mutationError.value = undefined
+  await nextTick()
+  formDialog.value?.showModal()
+}
+
+function closeForm() {
+  formDialog.value?.close()
+  selected.value = undefined
+  mutationError.value = undefined
+  save.reset()
+}
+
+function applySearch() {
+  page.value = 1
+  committedSearch.value = search.value.trim()
+}
+
+function updateFilter(name: string, event: Event) {
+  filters[name] = (event.target as HTMLInputElement | HTMLSelectElement).value
+  page.value = 1
+}
+</script>
+
+<template>
+  <div v-if="resource" class="page-stack">
+    <header class="page-header resource-header">
+      <div><p class="eyebrow">Resource</p><h1 v-text="resource.name" /><p class="page-lead" v-text="`${records.data.value?.total ?? 0} records available`" /></div>
+      <button v-if="canWrite" class="button primary" type="button" @click="openForm('create')">Create record</button>
+    </header>
+
+    <section class="toolbar" aria-label="Table controls">
+      <form class="search-box" role="search" @submit.prevent="applySearch">
+        <label class="sr-only" for="resource-search">Search records</label>
+        <input id="resource-search" v-model="search" type="search" placeholder="Search records" />
+        <button class="button secondary compact" type="submit">Search</button>
+      </form>
+      <div v-for="field in resource.fields.filter((candidate) => candidate.filterable)" :key="field.name" class="filter-control">
+        <label :for="`filter-${field.name}`" v-text="field.label" />
+        <select v-if="field.enumValues.length > 0" :id="`filter-${field.name}`" :value="filters[field.name] ?? ''" @change="updateFilter(field.name, $event)">
+          <option value="">All</option>
+          <option v-for="option in field.enumValues" :key="option" :value="option" v-text="option" />
+        </select>
+        <select v-else-if="field.type === 'bool'" :id="`filter-${field.name}`" :value="filters[field.name] ?? ''" @change="updateFilter(field.name, $event)">
+          <option value="">All</option><option value="true">Yes</option><option value="false">No</option>
+        </select>
+        <input v-else :id="`filter-${field.name}`" :value="filters[field.name] ?? ''" :type="['int32', 'int64', 'float64', 'decimal'].includes(field.type) ? 'number' : 'text'" @change="updateFilter(field.name, $event)" />
+      </div>
+    </section>
+
+    <p v-if="records.error.value" class="form-error" role="alert" v-text="messageFor(records.error.value)" />
+    <p class="sr-only" aria-live="polite" v-text="announcement" />
+    <DataTable
+      :columns="resource.columns"
+      :rows="records.data.value?.items ?? []"
+      :loading="records.isPending.value || records.isFetching.value"
+      :page="records.data.value?.page ?? page"
+      :total-pages="records.data.value?.total_pages ?? 0"
+      :total="records.data.value?.total ?? 0"
+      :sort="sort"
+      :can-write="canWrite"
+      @edit="openForm('update', $event)"
+      @delete="pendingDelete = $event"
+      @page="page = $event"
+      @sort="sort = $event; page = 1"
+    />
+
+    <dialog ref="formDialog" class="dialog form-dialog" @cancel.prevent="closeForm">
+      <FormShell :resource="resource" :mode="formMode" :record="selected" :busy="save.isPending.value" :server-error="mutationError" @submit="save.mutate($event)" @cancel="closeForm" />
+    </dialog>
+    <ConfirmDialog :open="pendingDelete !== undefined" :busy="remove.isPending.value" title="Delete this record?" :message="`Record #${pendingDelete?.id ?? ''} will be permanently deleted.`" @confirm="pendingDelete && remove.mutate(pendingDelete)" @cancel="pendingDelete = undefined" />
+  </div>
+</template>

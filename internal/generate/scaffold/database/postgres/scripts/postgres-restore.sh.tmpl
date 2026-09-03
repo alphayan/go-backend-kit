@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+if [ "$#" -ne 2 ]; then
+  echo 'usage: scripts/postgres-restore.sh /absolute/trusted-backup.dump app_restore_unique_name' >&2
+  exit 1
+fi
+backup=$1
+target=$2
+case "$backup" in /*) ;; *) echo 'Backup path must be absolute' >&2; exit 1 ;; esac
+test -f "$backup"
+case "$target" in app_restore_?*) ;; *) echo 'Target must start with app_restore_ and have a unique suffix' >&2; exit 1 ;; esac
+case "$target" in *[!a-z0-9_]*) echo 'Target may contain only lowercase letters, digits and underscores' >&2; exit 1 ;; esac
+if [ "${#target}" -gt 63 ]; then echo 'Target is too long' >&2; exit 1; fi
+# CREATE DATABASE fails if the target already exists. Never drop/clean an existing DB.
+docker compose exec -T postgres createdb -U postgres --owner=app_migrator --template=template0 "$target"
+docker compose exec -T postgres psql -X -U postgres -d postgres -v ON_ERROR_STOP=1 \
+  -c "REVOKE ALL ON DATABASE \"$target\" FROM PUBLIC"
+if ! docker compose exec -T postgres sh -c '
+  export PGPASSWORD="$POSTGRES_MIGRATOR_PASSWORD"
+  exec pg_restore -h 127.0.0.1 -U app_migrator --dbname="$1" --no-owner --single-transaction
+' sh "$target" < "$backup"; then
+  echo "Restore failed; new isolated database $target is retained for inspection. No source database was changed." >&2
+  exit 1
+fi
+docker compose exec -T postgres psql -X -U postgres -d postgres -v ON_ERROR_STOP=1 \
+  -c "REVOKE ALL ON DATABASE \"$target\" FROM PUBLIC; GRANT CONNECT ON DATABASE \"$target\" TO app_runtime"
+echo "Restored into $target; verify data, runtime permissions and migration status before any cutover."

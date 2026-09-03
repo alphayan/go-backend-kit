@@ -1,0 +1,109 @@
+export interface APIErrorPayload {
+  code: string
+  message: string
+  details?: Record<string, string> | null
+  request_id?: string
+}
+
+export class APIError extends Error {
+  readonly status: number
+  readonly code: string
+  readonly details: Record<string, string>
+  readonly requestID: string
+
+  constructor(status: number, payload: APIErrorPayload) {
+    super(payload.message)
+    this.name = "APIError"
+    this.status = status
+    this.code = payload.code
+    this.details = payload.details ?? {}
+    this.requestID = payload.request_id ?? ""
+  }
+}
+
+interface DataEnvelope<T> {
+  data: T
+}
+
+interface ErrorEnvelope {
+  error: APIErrorPayload
+}
+
+export interface Page<T> {
+  items: T[]
+  page: number
+  page_size: number
+  total: number
+  total_pages: number
+}
+
+export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const headers = new Headers(init.headers)
+  if (init.body !== undefined && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json")
+  }
+  headers.set("Accept", "application/json")
+
+  const response = await fetch(path, {
+    ...init,
+    credentials: "same-origin",
+    headers,
+  })
+  if (response.status === 204) {
+    return undefined as T
+  }
+
+  const body = await parseJSON(response)
+  if (!response.ok) {
+    const fallback: APIErrorPayload = {
+      code: "request_failed",
+      message: response.statusText || "Request failed",
+    }
+    const error = isErrorEnvelope(body) ? body.error : fallback
+    throw new APIError(response.status, error)
+  }
+  if (!isDataEnvelope<T>(body)) {
+    throw new APIError(response.status, {
+      code: "invalid_response",
+      message: "The server returned an invalid response.",
+    })
+  }
+  return body.data
+}
+
+async function parseJSON(response: Response): Promise<unknown> {
+  const text = await response.text()
+  if (text === "") {
+    return null
+  }
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    throw new APIError(response.status, {
+      code: "invalid_response",
+      message: "The server returned invalid JSON.",
+    })
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null
+}
+
+function isDataEnvelope<T>(value: unknown): value is DataEnvelope<T> {
+  return isRecord(value) && "data" in value
+}
+
+function isErrorEnvelope(value: unknown): value is ErrorEnvelope {
+  if (!isRecord(value) || !isRecord(value.error)) {
+    return false
+  }
+  return typeof value.error.code === "string" && typeof value.error.message === "string"
+}
+
+export function messageFor(error: unknown): string {
+  if (error instanceof APIError) {
+    return error.requestID === "" ? error.message : `${error.message} (request ${error.requestID})`
+  }
+  return error instanceof Error ? error.message : "Unexpected error"
+}

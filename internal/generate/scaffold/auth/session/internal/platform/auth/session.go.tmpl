@@ -1,0 +1,67 @@
+package auth
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"net/http"
+	"time"
+)
+
+type Identity struct {
+	SessionID int64  `json:"-"`
+	UserID    int64  `json:"id"`
+	Email     string `json:"email"`
+	Role      string `json:"role"`
+}
+
+type identityKey struct{}
+
+func WithIdentity(ctx context.Context, identity Identity) context.Context {
+	return context.WithValue(ctx, identityKey{}, identity)
+}
+
+func IdentityFromContext(ctx context.Context) (Identity, bool) {
+	identity, ok := ctx.Value(identityKey{}).(Identity)
+	return identity, ok
+}
+
+func NewSessionToken() string { return rand.Text() }
+
+func tokenDigest(token string) []byte {
+	digest := sha256.Sum256([]byte(token))
+	return digest[:]
+}
+
+func CookieName(secure bool) string {
+	if secure {
+		return "__Host-session"
+	}
+	return "session"
+}
+
+func SessionToken(request *http.Request, secure bool) string {
+	cookie, err := request.Cookie(CookieName(secure))
+	if err != nil {
+		return ""
+	}
+	return cookie.Value
+}
+
+func SetSessionCookie(response http.ResponseWriter, token string, secure bool, ttl time.Duration) {
+	maxAge := int(ttl / time.Second)
+	if maxAge < 1 {
+		maxAge = 1
+	}
+	http.SetCookie(response, &http.Cookie{
+		Name: CookieName(secure), Value: token, Path: "/", HttpOnly: true,
+		Secure: secure, SameSite: http.SameSiteLaxMode, MaxAge: maxAge,
+	})
+}
+
+func ClearSessionCookie(response http.ResponseWriter, secure bool) {
+	http.SetCookie(response, &http.Cookie{
+		Name: CookieName(secure), Path: "/", HttpOnly: true, Secure: secure,
+		SameSite: http.SameSiteLaxMode, MaxAge: -1, Expires: time.Unix(1, 0),
+	})
+}

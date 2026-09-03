@@ -186,12 +186,17 @@ func isGeneratedOutputPath(name string) bool {
 	switch name {
 	case projectMetadataName,
 		"internal/generated/register_gen.go",
+		"internal/generated/permissions_gen.go",
+		"web/src/generated/registry_gen.ts",
 		"tools/gormschema/main_gen.go",
 		"openapi/embed_gen.go",
 		"openapi/openapi_gen.json":
 		return true
 	}
 	parts := strings.Split(name, "/")
+	if len(parts) == 4 && parts[0] == "web" && parts[1] == "src" && parts[2] == "generated" {
+		return parts[3] == "registry_gen.ts" || (strings.HasSuffix(parts[3], "_gen.ts") && isResourcePackage(strings.TrimSuffix(parts[3], "_gen.ts")))
+	}
 	if len(parts) == 4 && parts[0] == "internal" && parts[1] == "resources" && isResourcePackage(parts[2]) {
 		return strings.HasSuffix(parts[3], "_gen.go") || strings.HasSuffix(parts[3], "_gen_test.go")
 	}

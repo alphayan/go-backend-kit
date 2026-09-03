@@ -1,0 +1,138 @@
+package auth
+
+import (
+	"container/list"
+	"context"
+	"strings"
+	"sync"
+	"time"
+)
+
+const rateLimitKeyCapacity = 10000
+
+type LoginLimiter struct {
+	store *Store
+	ip    *fixedWindowLRU
+	email *fixedWindowLRU
+}
+
+func NewLoginLimiter(store *Store, limit int, window time.Duration) *LoginLimiter {
+	if limit < 1 {
+		limit = 1
+	}
+	if window <= 0 {
+		window = 15 * time.Minute
+	}
+	emailLimit := limit * 3
+	if emailLimit < limit+1 {
+		emailLimit = limit + 1
+	}
+	return &LoginLimiter{
+		store: store,
+		ip:    newFixedWindowLRU(limit, window, rateLimitKeyCapacity),
+		email: newFixedWindowLRU(emailLimit, window, rateLimitKeyCapacity),
+	}
+}
+
+// Allow reserves before password verification so concurrent requests cannot
+// all pass an availability check before any of them records a failure.
+// An empty email consumes only the IP budget (logout).
+func (l *LoginLimiter) Allow(ctx context.Context, ip, email string, now time.Time) (bool, error) {
+	if err := ctx.Err(); err != nil { return false, err }
+	ip, email = strings.TrimSpace(ip), normalizeEmail(email)
+{{if .Options.IsPostgres}}	if l.store.db.Dialector.Name() == "postgres" {
+		return l.allowShared(ctx, ip, email)
+	}
+{{end}}	return l.ip.Take(ip, now) && (email == "" || l.email.Take(email, now)), nil
+}
+
+func (l *LoginLimiter) ClearEmail(ctx context.Context, email string) error {
+	if err := ctx.Err(); err != nil { return err }
+	email = normalizeEmail(email)
+{{if .Options.IsPostgres}}	if l.store.db.Dialector.Name() == "postgres" {
+		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		return l.store.db.WithContext(ctx).Where("kind = ? AND key_digest = ?", "email", rateKeyDigest(email)).Delete(&RateLimit{}).Error
+	}
+{{end}}	l.email.Delete(email)
+	return nil
+}
+
+type rateEntry struct {
+	key         string
+	windowStart time.Time
+	count       int
+}
+
+type fixedWindowLRU struct {
+	mu        sync.Mutex
+	limit     int
+	window    time.Duration
+	capacity  int
+	lastSweep time.Time
+	entries   map[string]*list.Element
+	lru       *list.List
+}
+
+func newFixedWindowLRU(limit int, window time.Duration, capacity int) *fixedWindowLRU {
+	return &fixedWindowLRU{limit: limit, window: window, capacity: capacity, entries: make(map[string]*list.Element, capacity), lru: list.New()}
+}
+
+func (l *fixedWindowLRU) Take(key string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.sweep(now)
+	entry := l.getOrInsert(key, now)
+	if !now.Before(entry.windowStart.Add(l.window)) {
+		entry.windowStart, entry.count = now, 0
+	}
+	if entry.count >= l.limit {
+		return false
+	}
+	entry.count++
+	return true
+}
+
+func (l *fixedWindowLRU) Delete(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if element, ok := l.entries[key]; ok {
+		l.remove(element)
+	}
+}
+
+func (l *fixedWindowLRU) getOrInsert(key string, now time.Time) *rateEntry {
+	if element, ok := l.entries[key]; ok {
+		l.lru.MoveToFront(element)
+		return element.Value.(*rateEntry)
+	}
+	if len(l.entries) >= l.capacity {
+		l.remove(l.lru.Back())
+	}
+	entry := &rateEntry{key: key, windowStart: now}
+	element := l.lru.PushFront(entry)
+	l.entries[key] = element
+	return entry
+}
+
+func (l *fixedWindowLRU) sweep(now time.Time) {
+	if !l.lastSweep.IsZero() && now.Before(l.lastSweep.Add(l.window)) {
+		return
+	}
+	for _, element := range l.entries {
+		entry := element.Value.(*rateEntry)
+		if !now.Before(entry.windowStart.Add(l.window)) {
+			l.remove(element)
+		}
+	}
+	l.lastSweep = now
+}
+
+func (l *fixedWindowLRU) remove(element *list.Element) {
+	if element == nil {
+		return
+	}
+	entry := element.Value.(*rateEntry)
+	delete(l.entries, entry.key)
+	l.lru.Remove(element)
+}

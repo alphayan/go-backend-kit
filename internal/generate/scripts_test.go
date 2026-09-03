@@ -63,6 +63,9 @@ func TestTemporaryPostgresCleanupRemovesAnonymousVolumes(t *testing.T) {
 	t.Run("root NATS E2E failure", func(t *testing.T) {
 		assertRootScriptCleansContainer(t, "nats-e2e.sh")
 	})
+	t.Run("root Session E2E failure", func(t *testing.T) {
+		assertRootScriptCleansContainer(t, "session-e2e.sh")
+	})
 
 	t.Run("generated Atlas success", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "api")
@@ -105,6 +108,9 @@ func TestTemporaryPostgresCleanupRequiresSuccessfulCreation(t *testing.T) {
 	})
 	t.Run("root NATS Docker creation failure", func(t *testing.T) {
 		assertRootScriptSkipsCleanupWhenRunFails(t, "nats-e2e.sh")
+	})
+	t.Run("root Session Docker creation failure", func(t *testing.T) {
+		assertRootScriptSkipsCleanupWhenRunFails(t, "session-e2e.sh")
 	})
 
 	t.Run("generated Atlas pre-creation failure", func(t *testing.T) {

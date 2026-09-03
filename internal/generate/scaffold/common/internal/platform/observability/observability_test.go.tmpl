@@ -1,0 +1,32 @@
+package observability
+
+import (
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestMetricsExposeHTTPAndBuildMetrics(t *testing.T) {
+	metrics := New(nil)
+	metrics.BeginRequest()
+	metrics.ObserveHTTP("GET", "/health/live", http.StatusOK, 25*time.Millisecond)
+
+	recorder := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("metrics status = %d", recorder.Code)
+	}
+	body, err := io.ReadAll(recorder.Result().Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, want := range []string{"http_server_requests_total", "http_server_request_duration_seconds", "app_build_info", "go_goroutines"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("metrics output missing %q:\n%s", want, text)
+		}
+	}
+}

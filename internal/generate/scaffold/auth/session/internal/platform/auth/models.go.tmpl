@@ -1,0 +1,42 @@
+package auth
+
+import "time"
+
+type User struct {
+	ID           int64      `gorm:"primaryKey;autoIncrement" json:"id"`
+	Email        string     `gorm:"size:320;not null;uniqueIndex" json:"email"`
+	PasswordHash string     `gorm:"type:text;not null" json:"-"`
+	Role         string     `gorm:"size:32;not null" json:"role"`
+	DisabledAt   *time.Time `gorm:"index" json:"disabled_at,omitempty"`
+	CreatedAt    time.Time  `gorm:"not null;autoCreateTime" json:"created_at"`
+	UpdatedAt    time.Time  `gorm:"not null;autoUpdateTime" json:"updated_at"`
+}
+
+func (User) TableName() string { return "auth_users" }
+
+type Session struct {
+	ID          int64     `gorm:"primaryKey;autoIncrement"`
+	UserID      int64     `gorm:"not null;index"`
+	User        User      `gorm:"constraint:OnUpdate:CASCADE,OnDelete:CASCADE;"`
+	TokenDigest []byte    `gorm:"size:32;not null;uniqueIndex"`
+	ExpiresAt   time.Time `gorm:"not null;index"`
+	LastSeenAt  time.Time `gorm:"not null"`
+	CreatedAt   time.Time `gorm:"not null;autoCreateTime"`
+	UserAgent   string    `gorm:"size:512;not null"`
+	IP          string    `gorm:"size:64;not null"`
+}
+
+func (Session) TableName() string { return "auth_sessions" }
+
+type AuditLog struct {
+	ID         int64     `gorm:"primaryKey;autoIncrement" json:"id"`
+	ActorID    *int64    `gorm:"index" json:"actor_id"`
+	Action     string    `gorm:"size:64;not null" json:"action"`
+	Resource   string    `gorm:"size:128;not null" json:"resource"`
+	ResourceID string    `gorm:"size:128;not null" json:"resource_id"`
+	Outcome    string    `gorm:"size:32;not null" json:"outcome"`
+	RequestID  string    `gorm:"size:128;not null" json:"request_id"`
+	CreatedAt  time.Time `gorm:"not null;autoCreateTime;index" json:"created_at"`
+}
+
+func (AuditLog) TableName() string { return "auth_audit_logs" }

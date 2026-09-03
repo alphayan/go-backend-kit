@@ -7,13 +7,16 @@ Generated with [go-backend-kit](https://github.com/alphayan/go-backend-kit) {{.V
 ## Requirements
 
 - Go {{.Pins.GoVersion}} or newer; toolchain {{.Pins.Toolchain}} is recommended
-{{if or .Options.IsPostgres .Options.HasRedis .Options.HasNATS}}- Docker for selected development services and Atlas migrations
+{{if .Options.HasSession}}- Node.js {{.Pins.Node}} LTS and pnpm {{.Pins.PNPM}} for frontend development and builds; neither is required by the production runtime
+{{end}}
+{{if .Options.IsProduction}}- Docker for the local application, Prometheus, Grafana, selected services, and Atlas migrations
+{{else if or .Options.IsPostgres .Options.HasRedis .Options.HasNATS}}- Docker for selected development services and Atlas migrations
 {{else}}- Docker is not required to run the application. Atlas migrations still use the pinned Atlas Community image when you generate SQL.
 {{end}}
 This project was created with:
 
 ```text
---http {{.Options.HTTP}} --database {{.Options.Database}} --cache {{.Options.Cache}} --messaging {{.Options.Messaging}} --logging {{.Options.Logging}} --auth {{.Options.Auth}}
+--http {{.Options.HTTP}} --database {{.Options.Database}} --cache {{.Options.Cache}} --messaging {{.Options.Messaging}} --logging {{.Options.Logging}} --auth {{.Options.Auth}} --profile {{.Options.Profile}}
 ```
 
 Provider choices are recorded in `.gobackend-project.json` and cannot be edited in place. Create a new project to change them.
@@ -25,9 +28,15 @@ go tool gobackend add path/to/resource.yaml
 go tool gobackend check
 ```
 
-The YAML files in `resources/` are the source of truth. The tracked `.gobackend-generated.json` manifest records every generator-owned path and its SHA-256 digest; handwritten `.go` files are never overwritten. A stale generated file is removed only if its bytes still match the manifest. If it was modified, generation fails safely instead of deleting it.
+The YAML files in `resources/` are the source of truth. The tracked `.gobackend-generated.json` manifest records every generator-owned path and its SHA-256 digest; resource generation never overwrites handwritten `.go` files. A stale generated file is removed only if its bytes still match the manifest. If it was modified, generation fails safely instead of deleting it.
 
 `go tool gobackend generate` invokes the pinned official `go tool gorm gen` workflow to regenerate field helpers used by store filters and sorting. The official GORM CLI is the sole producer of `gormgen/query_gen.go`; gobackend does not rewrite that output.
+
+## Scaffold upgrades
+
+Commit `.gobackend-scaffold.json`: it records upstream scaffold digests, independently of resource regeneration. From this directory, use a newer `gobackend upgrade` binary to preview, then `gobackend upgrade --apply` after review. Conflicts stop the whole batch; manually merge against the reported `candidate/` files and explicitly `--keep` each resolved scaffold path. A legacy project without this baseline needs `--baseline` pointing to a verified pristine original project with matching module/providers/resources, not a copy of its current edited state.
+
+Review/recovery artifacts live in private, gitignored `.gobackend/upgrade-*` directories: `plan.json`, `candidate/`, and original-file backups in `before/`. Do not edit or deploy during apply. Write failures are rolled back when possible, but a crash can leave a partial upgrade; inspect the plan/backups before retry or recovery. No real `.env`, migration or resource definition is changed. Upgrade does not switch providers, migrate databases or deploy. Afterwards run module tidy, generation/check, race/vet/vulnerability checks{{if .Options.HasSession}}, frozen pnpm installation and frontend/browser tests{{end}}, and explicitly review/apply any required database migration. Keep recovery artifacts until verification is complete.
 
 ## Database and migrations
 {{if .Options.IsSQLite}}
@@ -39,6 +48,8 @@ SQLite is a real runtime, not only a test double. Workloads that need PostgreSQL
 make migration name=create_products
 make migrate-apply
 ```
+{{else if .Options.IsProduction}}
+Follow [PostgreSQL production operations](docs/postgres-operations.md) for credential separation, initialization, explicit migrations and backup/restore. Configure `.env.postgres` first, start PostgreSQL, and apply reviewed migrations using `ATLAS_DATABASE_URL`. The API's `.env` contains only runtime database credentials.
 {{else}}
 ```bash
 docker compose up -d postgres
@@ -90,6 +101,57 @@ Example test token (replace issuer, audience, and key):
 # Use a trusted local tool or test helper. Never commit the key or a production token.
 ```
 {{end}}
+{{if .Options.HasSession}}
+## Database session authentication
+
+This project uses first-party credentials and revocable database sessions. `POST /auth/login` and `POST /auth/logout` are public (logout is idempotent); `GET /auth/me`, `POST /auth/password`, and every `/api/v1` route require a session. Session 401 responses intentionally omit `WWW-Authenticate`.
+
+The migration source of truth is the GORM models `auth_users`, `auth_sessions`, and `auth_audit_logs`{{if .Options.IsPostgres}}, plus `auth_rate_limits` for shared login limiting{{end}}. No handwritten authentication-table migration is shipped. Before the first start, run `make migration name=session_auth`, review the SQL and commit it, then run `make migrate-apply`. Runtime startup never calls `AutoMigrate`. The fixed roles are `admin` (all generated permissions) and `viewer` (generated reads only); user role assignments are editable, but role definitions and permission sets are not.
+
+SQLite unit tests create the same authentication models with test-only `AutoMigrate`, without Docker. AutoMigrate and Atlas independently render DDL: passing these unit tests does not prove the reviewed migrations apply or match the model schema. Keep the disposable-database Atlas apply/schema-diff gate as a separate check; PostgreSQL integration tests require an explicitly migrated disposable database.
+
+On an empty `auth_users` table, startup fails unless both `AUTH_BOOTSTRAP_EMAIL` and `AUTH_BOOTSTRAP_PASSWORD` are set. Use a unique bootstrap password. After the first successful start, remove both variables and immediately rotate the password through `/auth/password`; later starts ignore non-empty bootstrap values once any user exists.
+
+Stored password encodings intentionally omit a leading `$`: `argon2id$v=19$m=<KiB>,t=<passes>,p=<lanes>$<salt>$<digest>` and legacy `pbkdf2-sha256$i=<iterations>$<salt>$<digest>`. Salt (16 bytes) and digest (32 bytes) use unpadded standard Base64. The Argon2id format is PHC-adjacent, not standard PHC; external PHC decoders are not directly compatible. Do not silently add the leading `$` or change the parser: any format change must preserve existing hashes through explicit compatibility/migration handling.
+
+Passwords use Argon2id with the shipped OWASP configuration `m=19456,t=2,p=1`; PBKDF2-SHA256 stored hashes remain readable as the documented FIPS migration path. Tune Argon2id to roughly 100–300 ms on the deployment host. The active Argon2 working buffers use about `stored-hash memory × AUTH_PASSWORD_HASH_CONCURRENCY`: the default four slots mean 76 MiB for default hashes, or 256 MiB at the accepted stored-hash ceiling of 64 MiB. This is not a process RSS cap: GC-retained allocations, other application work and runtime overhead need additional headroom. KDF work is capped per process and rejects without queueing with 429 when full. Login/logout consume the IP budget; login also reserves an email attempt before KDF work (including unknown accounts and hash-capacity rejection). The email limit is three times `AUTH_LOGIN_RATE_LIMIT`, cleared on successful credential verification. Reserving before verification prevents concurrent failure overshoot. The per-IP key uses Echo `RealIP`; configure an `IPExtractor` only for trusted proxies, otherwise forwarded headers can be spoofed. Behind a proxy without an extractor, all clients share the proxy's bucket.
+
+Measure the actual password paths on the target host with `GOGC=100 GOMEMLIMIT=2GiB go test ./internal/platform/auth -run='^$' -bench='^BenchmarkPassword$' -benchmem -benchtime=1s -count=10 -cpu=1,4`. The benchmark includes Argon2id hash/verification and legacy PBKDF2-SHA256 verification at 600,000 iterations, each serially and with `RunParallel`. It uses synthetic credentials and no database. Record the hardware/toolchain, parameters and GC settings with the raw output; compare repeated samples using benchstat or equivalent statistics. Parallel `ns/op` is elapsed time divided by completed operations, not individual login latency; `B/op` is allocated bytes, not peak live memory/RSS. Run `-race` separately. These measurements exclude HTTP, database work, KDF admission/rejections and post-login rehash, and do not establish algorithm strength or a deployment SLO. The Go memory limit is a soft GC target, not a hard safety limit; choose CPU/concurrency and memory budgets appropriate to the host.
+
+{{if .Options.IsPostgres}}PostgreSQL shares these budgets across processes and restarts, using database time and a short transaction that ends before hashing. All replicas must use the same database/schema and rate/window settings. Each keyspace is capped at 10,000 digests; full keyspaces reject new keys until expiry rather than evicting active budgets. Expired rows are removed on the next request. Database errors/timeouts fail closed with 500, not a process-local fallback. IP/email SHA-256 digests are not anonymization. A two-second deadline bounds each database operation; the table lock intentionally serializes low-volume authentication traffic, so load-test your deployment before scaling. Existing projects must explicitly migrate the new table before running the updated handlers; old binaries still use local limiting and must be drained before claiming a cluster-wide bound.
+
+Disposable database check (deletes/fills `auth_rate_limits`; never use real data): `TEST_RATE_DATABASE_URL="..." TEST_RATE_DISPOSABLE=1 go test -race ./internal/platform/auth -run '^TestPostgresSharedLimiter$' -count=1`. It runs two separate processes and checks shared IP/email quotas, expiry, capacity, cancellation and fail-closed behavior. Run it separately from application tests.{{else}}SQLite uses bounded process-local LRU windows; run one application process. Multi-instance budgets require PostgreSQL, not a shared SQLite file.{{end}}
+
+The cookie is `__Host-session` when `AUTH_SESSION_SECURE=true`, otherwise `session` for personal local development. Production rejects an insecure cookie configuration. Keep TLS and HSTS enabled in production because standard-library origin checking compares hosts without treating the URL scheme as a separate trust boundary.
+
+The generated admin console is available at `/admin/`. Its resource registry, Zod schemas, form descriptors, and table columns are regenerated from `resources/*.yaml` and tracked in `.gobackend-generated.json`. Shared components and views are editable scaffold files that later resource generation leaves untouched. Admins can create, update, and delete records, while viewers receive a read-only UI backed by the same server authorization. Login/logout, password change, search, declared filters and sorts, pagination, responsive layouts, accessible dialogs, and light/dark/system themes are included.
+
+Use `make frontend-install`, `make frontend-typecheck`, `make frontend-test`, and `make frontend-build`. `make frontend-dev` starts Vite with `/auth` and `/api` proxied to the Go server, preserving the session same-origin boundary. Production builds compile `web/dist` before the Go binary embeds it; Node.js and pnpm are not runtime dependencies.
+
+`net/http.CrossOriginProtection` runs globally. Safe methods, `Sec-Fetch-Site: same-origin` or `none`, requests carrying neither `Sec-Fetch-Site` nor `Origin`, and requests whose Origin host matches Host are allowed. The latter two are documented fail-open boundaries. Cross-origin CORS permission does not exempt a browser write. The generated Vite server proxies browser API traffic to the Go origin; no Vite origin is trusted in the production binary. No GET endpoint may change state.
+
+Audit writes occur after a resource mutation commits and are best-effort. An audit failure is logged without changing the already-committed response, so a process crash in that small window can lose an event. Request bodies, passwords, tokens, and cookie values are never audited. `AUTH_AUDIT_RETENTION_DAYS=0` keeps all events (default). A positive value explicitly enables hourly deletion of older events, in batches of 1,000 with a 100,000-row hourly cap. Archive required evidence before enabling retention.
+
+Admins can use `/admin/users` to create accounts, assign the fixed admin/viewer roles, disable/re-enable accounts, and view/revoke active sessions. Users cannot change their own role/status; changes to other users revoke their sessions. The server rechecks the acting administrator inside the mutation transaction, including concurrent access changes. There is no user deletion or password-reset endpoint.
+
+Admin-only APIs: `GET/POST /auth/users`, `PATCH /auth/users/:id`, `GET/DELETE /auth/users/:id/sessions`, `DELETE /auth/users/:id/sessions/:session_id`, and `GET /auth/audit-logs`. Lists accept `page` and `page_size` (1–100). User lookup accepts an exact `email`; audit lookup accepts exact `actor_id`, `action`, `resource`, `outcome`, plus RFC3339 `from` (inclusive) and `to` (exclusive). Audit rows are newest first and displayed at `/admin/audit`. Responses exclude password hashes and session token digests and use `Cache-Control: no-store`.
+
+`pnpm frontend:e2e` runs real Chromium interactions using Playwright. It creates test accounts and changes passwords: use only a fresh, explicitly migrated disposable database, never real data. Build the frontend first and install Chromium with `PLAYWRIGHT_SKIP_BROWSER_GC=1 pnpm exec playwright install chromium`, then run with `E2E_DISPOSABLE_DATABASE=1`. The test starts its own loopback server on port 4187 (`E2E_PORT` override), refuses to reuse an existing server, and stops it on exit. This HTTP harness targets the personal profile. The generator repository separately provides `scripts/frontend-e2e.sh production` with temporary SQLite and a test TLS proxy for Secure-cookie/cross-site checks; it does not install a production proxy or certificate in this project. Real domains, HSTS, trusted proxies and PostgreSQL deployment still require separate acceptance. Failure screenshots and traces go to gitignored `test-results/` and may contain test credentials.
+
+Projects using `--auth session` require a generator version that understands that option; older generators fail closed when reading the project metadata.
+{{end}}
+{{if .Options.IsProduction}}
+## Production run
+
+    cp .env.example .env
+{{if .Options.IsPostgres}}    cp .env.postgres.example .env.postgres
+    chmod 600 .env .env.postgres
+    # Follow docs/postgres-operations.md to set credentials, initialize and migrate first
+{{end}}
+    make up
+
+The production profile starts the API, Prometheus, and Grafana with Docker Compose. Use make logs, make down, and make compose-config (quiet validation without printing secrets) for the local lifecycle. The API is available at http://localhost:8080, Prometheus at http://localhost:9090, and Grafana at http://localhost:3000. Change GRAFANA_ADMIN_PASSWORD in .env before sharing the stack.
+{{else}}
 ## Run
 
 ```bash
@@ -106,6 +168,7 @@ Endpoints:
 - OpenAPI: `http://localhost:8080/openapi.json`
 - Swagger UI: `http://localhost:8080/docs`
 
+{{end}}
 ## Verify
 
 ```bash
@@ -126,6 +189,9 @@ The server uses request IDs, JSON structured logging through `*slog.Logger`, pan
 {{if .Options.IsPostgres}}
 The PostgreSQL pool defaults to 25 open connections, 25 idle connections, a 30-minute connection lifetime, and a 5-minute idle lifetime. Configure it with `DB_MAX_OPEN_CONNS`, `DB_MAX_IDLE_CONNS`, `DB_CONN_MAX_LIFETIME`, and `DB_CONN_MAX_IDLE_TIME`. Startup performs a fail-closed database probe bounded by `DB_CONNECT_TIMEOUT`, which defaults to 5 seconds.
 {{end}}
+{{if .Options.IsProduction}}
+The production profile additionally exposes /metrics, records HTTP request rate, latency, in-flight requests, and database-pool metrics, and provisions Prometheus alerts plus a Grafana dashboard. Log level and service metadata are controlled by LOG_LEVEL, SERVICE_NAME, ENVIRONMENT, and BUILD_VERSION.
+{{end}}
 ## Image licenses
 
 Pinned tool and server images are not covered by this repository's MIT license:
@@ -134,6 +200,8 @@ Pinned tool and server images are not covered by this repository's MIT license:
 {{if .Options.IsPostgres}}- `{{.Pins.PostgresImage}}`: PostgreSQL License
 {{end}}{{if .Options.HasRedis}}- `{{.Pins.RedisImage}}`: Redis source-available licenses (RSALv2 / SSPLv1 / AGPLv3), not MIT
 {{end}}{{if .Options.HasNATS}}- `{{.Pins.NATSImage}}`: Apache License 2.0
+{{end}}
+{{if .Options.IsProduction}}The production profile does not generate Kubernetes manifests or CI image-publish/deployment jobs.
 {{end}}
 ## License
 

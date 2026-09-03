@@ -1,0 +1,130 @@
+package app
+
+import (
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"{{.Module}}/internal/platform/auth"
+	"{{.Module}}/internal/platform/httpx"
+	"gorm.io/gorm"
+{{if .Options.IsProduction}}	"{{.Module}}/internal/platform/observability"
+{{end}})
+
+func TestAdminUserLifecycleAndAudit(t *testing.T) {
+	runAdminUserLifecycleAndAudit(t, sessionTestDB(t))
+}
+
+func runAdminUserLifecycleAndAudit(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	store := auth.NewStore(db)
+	passwords := sessionTestPasswords(t)
+	admin := createSessionTestUser(t, store, passwords, "admin@example.com", "admin", "correct horse battery staple")
+	viewer := createSessionTestUser(t, store, passwords, "viewer@example.com", "viewer", "correct horse battery staple")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	e := New(sessionTestConfig(), db, logger{{if .Options.IsProduction}}, observability.New(nil){{end}}, store, passwords)
+	cookieFor := func(userID int64) *http.Cookie {
+		t.Helper()
+		token, err := store.CreateSession(t.Context(), userID, "", "test browser", "127.0.0.1", time.Hour, time.Now().UTC())
+		if err != nil { t.Fatal(err) }
+		return &http.Cookie{Name: "session", Value: token}
+	}
+	adminCookie, viewerCookie := cookieFor(admin.ID), cookieFor(viewer.ID)
+	request := func(method, path string, body any, cookie *http.Cookie, want int) *httptest.ResponseRecorder {
+		t.Helper()
+		response := sessionRequest(e, method, path, body, cookie, nil)
+		if response.Code != want { t.Fatalf("%s %s = %d, want %d: %s", method, path, response.Code, want, response.Body.String()) }
+		return response
+	}
+	for _, route := range []struct { method, path string }{
+		{"GET", "/auth/users"}, {"POST", "/auth/users"}, {"PATCH", "/auth/users/1"},
+		{"GET", "/auth/users/1/sessions"}, {"DELETE", "/auth/users/1/sessions"},
+		{"DELETE", "/auth/users/1/sessions/1"}, {"GET", "/auth/audit-logs"},
+	} {
+		request(route.method, route.path, nil, nil, 401)
+		request(route.method, route.path, nil, viewerCookie, 403)
+		if route.method != "GET" {
+			response := sessionRequest(e, route.method, route.path, nil, adminCookie, map[string]string{"Sec-Fetch-Site": "cross-site"})
+			if response.Code != 403 { t.Fatalf("cross-site %s = %d", route.path, response.Code) }
+		}
+	}
+	created := request("POST", "/auth/users", map[string]string{"email": " New@Example.com ", "password": "a new secure password", "role": "viewer"}, adminCookie, 201)
+	var userBody httpx.Data[auth.User]
+	if err := json.Unmarshal(created.Body.Bytes(), &userBody); err != nil { t.Fatal(err) }
+	user := userBody.Data
+	if user.ID <= 0 || user.Email != "new@example.com" || user.Role != "viewer" || user.PasswordHash != "" { t.Fatalf("created user = %#v", user) }
+	assertNoAdminSecrets(t, created.Body.String())
+	request("POST", "/auth/users", map[string]string{"email": user.Email, "password": "a new secure password", "role": "viewer"}, adminCookie, 409)
+	for _, body := range []any{
+		map[string]string{"email": "bad", "password": "a new secure password", "role": "viewer"},
+		map[string]string{"email": "ok@example.com", "password": "short", "role": "viewer"},
+		map[string]string{"email": "ok@example.com", "password": "a new secure password", "role": "owner"},
+		map[string]any{"email": "ok@example.com", "password": "a new secure password", "role": "viewer", "id": 99},
+	} { request("POST", "/auth/users", body, adminCookie, 400) }
+	list := request("GET", "/auth/users?email=NEW@example.com&page_size=1", nil, adminCookie, 200)
+	var users httpx.Data[httpx.Page[auth.User]]
+	if err := json.Unmarshal(list.Body.Bytes(), &users); err != nil { t.Fatal(err) }
+	if users.Data.Total != 1 || len(users.Data.Items) != 1 || users.Data.Items[0].ID != user.ID || list.Header().Get("Cache-Control") != "no-store" { t.Fatalf("users = %s", list.Body.String()) }
+	assertNoAdminSecrets(t, list.Body.String())
+	request("GET", "/auth/users?page_size=101", nil, adminCookie, 400)
+	request("GET", "/auth/users?page=9223372036854775807", nil, adminCookie, 400)
+	request("PATCH", "/auth/users/"+strconv.FormatInt(admin.ID, 10), map[string]bool{"disabled": true}, adminCookie, 400)
+	path := "/auth/users/"+strconv.FormatInt(user.ID, 10)
+	request("PATCH", path, map[string]string{"role": "owner"}, adminCookie, 400)
+	request("PATCH", path, map[string]any{}, adminCookie, 400)
+	request("PATCH", path, map[string]any{"role": nil, "disabled": false}, adminCookie, 400)
+	request("PATCH", path, map[string]any{"role": "viewer", "disabled": nil}, adminCookie, 400)
+	request("PATCH", "/auth/users/999999", map[string]bool{"disabled": true}, adminCookie, 404)
+	request("PATCH", "/auth/users/-1", map[string]bool{"disabled": true}, adminCookie, 400)
+	userCookie := cookieFor(user.ID)
+	sessions := request("GET", path+"/sessions", nil, adminCookie, 200)
+	var sessionBody httpx.Data[httpx.Page[auth.SessionInfo]]
+	if err := json.Unmarshal(sessions.Body.Bytes(), &sessionBody); err != nil { t.Fatal(err) }
+	if sessionBody.Data.Total != 1 || len(sessionBody.Data.Items) != 1 { t.Fatalf("sessions = %s", sessions.Body.String()) }
+	assertNoAdminSecrets(t, sessions.Body.String())
+	sessionID := strconv.FormatInt(sessionBody.Data.Items[0].ID, 10)
+	request("DELETE", "/auth/users/"+strconv.FormatInt(viewer.ID, 10)+"/sessions/"+sessionID, nil, adminCookie, 404)
+	request("GET", "/auth/me", nil, userCookie, 200)
+	request("DELETE", path+"/sessions/"+sessionID, nil, adminCookie, 204)
+	request("GET", "/auth/me", nil, userCookie, 401)
+	userCookie = cookieFor(user.ID)
+	request("PATCH", path, map[string]string{"role": "admin"}, adminCookie, 200)
+	request("GET", "/auth/me", nil, userCookie, 401)
+	userCookie = cookieFor(user.ID)
+	request("GET", "/auth/users", nil, userCookie, 200)
+	request("PATCH", path, map[string]bool{"disabled": true}, adminCookie, 200)
+	request("GET", "/auth/me", nil, userCookie, 401)
+	request("POST", "/auth/login", map[string]string{"email": user.Email, "password": "a new secure password"}, nil, 401)
+	request("PATCH", path, map[string]any{"disabled": false, "role": "viewer"}, adminCookie, 200)
+	request("POST", "/auth/login", map[string]string{"email": user.Email, "password": "a new secure password"}, nil, 200)
+	request("DELETE", path+"/sessions", nil, adminCookie, 204)
+	empty := request("GET", path+"/sessions", nil, adminCookie, 200)
+	if !strings.Contains(empty.Body.String(), `"items":[]`) { t.Fatalf("empty sessions = %s", empty.Body.String()) }
+	auditPath := "/auth/audit-logs?resource=auth_users&action=user_create&outcome=success&actor_id="+strconv.FormatInt(admin.ID, 10)
+	audits := request("GET", auditPath, nil, adminCookie, 200)
+	var auditBody httpx.Data[httpx.Page[auth.AuditLog]]
+	if err := json.Unmarshal(audits.Body.Bytes(), &auditBody); err != nil { t.Fatal(err) }
+	if auditBody.Data.Total != 1 || len(auditBody.Data.Items) != 1 || auditBody.Data.Items[0].ResourceID != strconv.FormatInt(user.ID, 10) { t.Fatalf("audits = %s", audits.Body.String()) }
+	assertNoAdminSecrets(t, audits.Body.String())
+	request("GET", "/auth/audit-logs?from=bad", nil, adminCookie, 400)
+	request("GET", "/auth/audit-logs?actor_id=-1", nil, adminCookie, 400)
+	request("GET", "/auth/audit-logs?from=2026-01-02T00:00:00Z&to=2026-01-01T00:00:00Z", nil, adminCookie, 400)
+	old := request("GET", auditPath+"&to=2000-01-01T00:00:00Z", nil, adminCookie, 200)
+	if !strings.Contains(old.Body.String(), `"items":[]`) { t.Fatalf("time filter = %s", old.Body.String()) }
+	// Stored permissions, not the middleware's earlier identity snapshot, decide mutations.
+	if _, err := store.AdminCreateUser(t.Context(), viewer.ID, "forbidden@example.com", "unused", "admin"); err != auth.ErrAdminRequired { t.Fatalf("viewer store mutation = %v", err) }
+	if _, err := store.AdminUpdateUser(t.Context(), viewer.ID, admin.ID, new("viewer"), nil, time.Now()); err != auth.ErrAdminRequired { t.Fatalf("viewer role mutation = %v", err) }
+}
+
+func assertNoAdminSecrets(t *testing.T, body string) {
+	t.Helper()
+	for _, secret := range []string{"password_hash", "PasswordHash", "token_digest", "TokenDigest", "argon2id", "a new secure password"} {
+		if strings.Contains(body, secret) { t.Fatalf("response contains %q", secret) }
+	}
+}

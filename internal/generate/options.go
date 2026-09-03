@@ -14,6 +14,7 @@ type CacheChoice string
 type MessagingChoice string
 type LoggingChoice string
 type AuthChoice string
+type ProfileChoice string
 
 const (
 	HTTPEcho  HTTPChoice = "echo"
@@ -32,8 +33,12 @@ const (
 	LoggingZap     LoggingChoice = "zap"
 	LoggingZerolog LoggingChoice = "zerolog"
 
-	AuthNone AuthChoice = "none"
-	AuthJWT  AuthChoice = "jwt"
+	AuthNone    AuthChoice = "none"
+	AuthJWT     AuthChoice = "jwt"
+	AuthSession AuthChoice = "session"
+
+	ProfilePersonal   ProfileChoice = "personal"
+	ProfileProduction ProfileChoice = "production"
 )
 
 var (
@@ -42,7 +47,8 @@ var (
 	cacheChoices     = []string{string(CacheNone), string(CacheRedis)}
 	messagingChoices = []string{string(MessagingNone), string(MessagingNATS)}
 	loggingChoices   = []string{string(LoggingSlog), string(LoggingZap), string(LoggingZerolog)}
-	authChoices      = []string{string(AuthNone), string(AuthJWT)}
+	authChoices      = []string{string(AuthNone), string(AuthJWT), string(AuthSession)}
+	profileChoices   = []string{string(ProfilePersonal), string(ProfileProduction)}
 )
 
 type ProjectOptions struct {
@@ -52,6 +58,7 @@ type ProjectOptions struct {
 	Messaging MessagingChoice `json:"messaging"`
 	Logging   LoggingChoice   `json:"logging"`
 	Auth      AuthChoice      `json:"auth"`
+	Profile   ProfileChoice   `json:"profile"`
 }
 
 func DefaultProjectOptions() ProjectOptions {
@@ -62,6 +69,7 @@ func DefaultProjectOptions() ProjectOptions {
 		Messaging: MessagingNone,
 		Logging:   LoggingSlog,
 		Auth:      AuthNone,
+		Profile:   ProfilePersonal,
 	}
 }
 
@@ -73,10 +81,12 @@ func LegacyProjectOptions() ProjectOptions {
 		Messaging: MessagingNone,
 		Logging:   LoggingSlog,
 		Auth:      AuthNone,
+		Profile:   ProfilePersonal,
 	}
 }
 
 func (o ProjectOptions) Validate() error {
+	o = o.normalized()
 	switch o.HTTP {
 	case HTTPEcho, HTTPFiber:
 	default:
@@ -103,25 +113,46 @@ func (o ProjectOptions) Validate() error {
 		return invalidChoiceError("logging", string(o.Logging), loggingChoices)
 	}
 	switch o.Auth {
-	case AuthNone, AuthJWT:
+	case AuthNone, AuthJWT, AuthSession:
 	default:
 		return invalidChoiceError("auth", string(o.Auth), authChoices)
+	}
+	switch o.Profile {
+	case ProfilePersonal, ProfileProduction:
+	default:
+		return invalidChoiceError("profile", string(o.Profile), profileChoices)
+	}
+	if o.Auth == AuthSession && o.HTTP != HTTPEcho {
+		return fmt.Errorf("auth %q requires --http echo; Fiber session authentication is not supported in v1", o.Auth)
 	}
 	return nil
 }
 
 func (o ProjectOptions) Fingerprint() (string, error) {
+	return o.fingerprint(false)
+}
+
+func (o ProjectOptions) legacyFingerprint() (string, error) {
+	return o.fingerprint(true)
+}
+
+func (o ProjectOptions) fingerprint(legacy bool) (string, error) {
+	o = o.normalized()
 	if err := o.Validate(); err != nil {
 		return "", err
 	}
-	payload, err := json.Marshal(map[string]string{
+	selection := map[string]string{
 		"auth":      string(o.Auth),
 		"cache":     string(o.Cache),
 		"database":  string(o.Database),
 		"http":      string(o.HTTP),
 		"logging":   string(o.Logging),
 		"messaging": string(o.Messaging),
-	})
+	}
+	if !legacy {
+		selection["profile"] = string(o.Profile)
+	}
+	payload, err := json.Marshal(selection)
 	if err != nil {
 		return "", fmt.Errorf("encode selection fingerprint: %w", err)
 	}
@@ -132,6 +163,10 @@ func (o ProjectOptions) Fingerprint() (string, error) {
 func (o ProjectOptions) HasRedis() bool   { return o.Cache == CacheRedis }
 func (o ProjectOptions) HasNATS() bool    { return o.Messaging == MessagingNATS }
 func (o ProjectOptions) HasJWT() bool     { return o.Auth == AuthJWT }
+func (o ProjectOptions) HasSession() bool { return o.Auth == AuthSession }
+func (o ProjectOptions) IsProduction() bool {
+	return o.normalized().Profile == ProfileProduction
+}
 func (o ProjectOptions) IsSQLite() bool   { return o.Database == DatabaseSQLite }
 func (o ProjectOptions) IsPostgres() bool { return o.Database == DatabasePostgres }
 func (o ProjectOptions) IsEcho() bool     { return o.HTTP == HTTPEcho }
@@ -140,6 +175,16 @@ func (o ProjectOptions) IsSlog() bool     { return o.Logging == LoggingSlog }
 func (o ProjectOptions) IsZap() bool      { return o.Logging == LoggingZap }
 func (o ProjectOptions) IsZerolog() bool  { return o.Logging == LoggingZerolog }
 
+func (o ProjectOptions) normalized() ProjectOptions {
+	if o.Profile == "" {
+		o.Profile = ProfilePersonal
+	}
+	return o
+}
+
 func invalidChoiceError(name, value string, allowed []string) error {
 	return fmt.Errorf("invalid %s value %q (allowed: %s)", name, value, strings.Join(allowed, ", "))
 }
+
+// AuthChoices returns a copy of the supported command-line auth values.
+func AuthChoices() []string { return append([]string(nil), authChoices...) }

@@ -28,6 +28,12 @@ func selectedScaffoldFiles(opts ProjectOptions) ([]scaffoldFile, error) {
 	if opts.HasJWT() {
 		files = append(files, jwtScaffoldFiles()...)
 	}
+	if opts.HasSession() {
+		files = append(files, sessionScaffoldFiles(opts)...)
+	}
+	if opts.IsProduction() {
+		files = append(files, productionScaffoldFiles()...)
+	}
 	if err := detectScaffoldCollisions(files); err != nil {
 		return nil, err
 	}
@@ -55,10 +61,24 @@ func commonScaffoldFiles(opts ProjectOptions) []scaffoldFile {
 		"common/internal/platform/config/config.go.tmpl",
 		"common/internal/platform/httpx/httpx.go.tmpl",
 	)
-	if opts.IsPostgres() || opts.HasRedis() || opts.HasNATS() {
+	if opts.IsProduction() || opts.IsPostgres() || opts.HasRedis() || opts.HasNATS() {
 		files = append(files, mapScaffold("common/", "common/docker-compose.yml.tmpl")...)
 	}
 	return files
+}
+
+func productionScaffoldFiles() []scaffoldFile {
+	return mapScaffold("common/",
+		"common/Dockerfile.tmpl",
+		"common/.dockerignore.tmpl",
+		"common/observability/prometheus.yml.tmpl",
+		"common/observability/alerts.yml.tmpl",
+		"common/observability/grafana/provisioning/datasources/datasources.yml.tmpl",
+		"common/observability/grafana/provisioning/dashboards/dashboards.yml.tmpl",
+		"common/observability/grafana/dashboards/backend.json",
+		"common/internal/platform/observability/observability.go.tmpl",
+		"common/internal/platform/observability/observability_test.go.tmpl",
+	)
 }
 
 func httpScaffoldFiles(opts ProjectOptions) []scaffoldFile {
@@ -90,12 +110,22 @@ func databaseScaffoldFiles(opts ProjectOptions) []scaffoldFile {
 			"database/sqlite/scripts/atlas.sh.tmpl",
 		)
 	case DatabasePostgres:
-		return mapScaffold("database/postgres/",
+		files := mapScaffold("database/postgres/",
 			"database/postgres/internal/platform/database/database.go.tmpl",
 			"database/postgres/internal/platform/database/database_test.go.tmpl",
 			"database/postgres/internal/platform/config/config_test.go.tmpl",
 			"database/postgres/scripts/atlas.sh.tmpl",
 		)
+		if opts.IsProduction() {
+			files = append(files, mapScaffold("database/postgres/",
+				"database/postgres/.env.postgres.example.tmpl",
+				"database/postgres/scripts/postgres-init.sh.tmpl",
+				"database/postgres/scripts/postgres-backup.sh.tmpl",
+				"database/postgres/scripts/postgres-restore.sh.tmpl",
+				"database/postgres/docs/postgres-operations.md.tmpl",
+			)...)
+		}
+		return files
 	default:
 		return nil
 	}
@@ -142,6 +172,78 @@ func jwtScaffoldFiles() []scaffoldFile {
 		"auth/jwt/internal/platform/auth/auth.go.tmpl",
 		"auth/jwt/internal/platform/auth/auth_test.go.tmpl",
 	)
+}
+
+func sessionScaffoldFiles(opts ProjectOptions) []scaffoldFile {
+	files := mapScaffold("auth/session/",
+		"auth/session/.node-version.tmpl",
+		"auth/session/.npmrc.tmpl",
+		"auth/session/package.json.tmpl",
+		"auth/session/pnpm-lock.yaml.tmpl",
+		"auth/session/pnpm-workspace.yaml.tmpl",
+		"auth/session/web/index.html.tmpl",
+		"auth/session/web/tsconfig.json.tmpl",
+		"auth/session/web/vite.config.ts.tmpl",
+		"auth/session/web/vitest.config.ts.tmpl",
+		"auth/session/web/playwright.config.ts.tmpl",
+		"auth/session/web/e2e/admin.spec.ts.tmpl",
+		"auth/session/web/dist/.gitkeep",
+		"auth/session/web/fallback.html.tmpl",
+		"auth/session/web/embed.go.tmpl",
+		"auth/session/web/embed_test.go.tmpl",
+		"auth/session/web/src/App.vue.tmpl",
+		"auth/session/web/src/main.ts.tmpl",
+		"auth/session/web/src/router.ts.tmpl",
+		"auth/session/web/src/styles.css.tmpl",
+		"auth/session/web/src/vite-env.d.ts.tmpl",
+		"auth/session/web/src/components/AppShell.vue.tmpl",
+		"auth/session/web/src/components/ConfirmDialog.vue.tmpl",
+		"auth/session/web/src/components/DataTable.vue.tmpl",
+		"auth/session/web/src/components/FieldInput.vue.tmpl",
+		"auth/session/web/src/components/FormShell.vue.tmpl",
+		"auth/session/web/src/lib/api.ts.tmpl",
+		"auth/session/web/src/lib/api.test.ts.tmpl",
+		"auth/session/web/src/lib/auth.ts.tmpl",
+		"auth/session/web/src/lib/auth.test.ts.tmpl",
+		"auth/session/web/src/lib/forms.ts.tmpl",
+		"auth/session/web/src/lib/forms.test.ts.tmpl",
+		"auth/session/web/src/lib/resource.ts.tmpl",
+		"auth/session/web/src/lib/theme.ts.tmpl",
+		"auth/session/web/src/views/AccountView.vue.tmpl",
+		"auth/session/web/src/views/UsersView.vue.tmpl",
+		"auth/session/web/src/views/AuditView.vue.tmpl",
+		"auth/session/web/src/views/DashboardView.vue.tmpl",
+		"auth/session/web/src/views/LoginView.vue.tmpl",
+		"auth/session/web/src/views/NotFoundView.vue.tmpl",
+		"auth/session/web/src/views/ResourceView.vue.tmpl",
+		"auth/session/internal/platform/auth/models.go.tmpl",
+		"auth/session/internal/platform/auth/admin.go.tmpl",
+		"auth/session/internal/platform/auth/password.go.tmpl",
+		"auth/session/internal/platform/auth/password_test.go.tmpl",
+		"auth/session/internal/platform/auth/ratelimit.go.tmpl",
+		"auth/session/internal/platform/auth/ratelimit_test.go.tmpl",
+		"auth/session/internal/platform/auth/session.go.tmpl",
+		"auth/session/internal/platform/auth/session_test.go.tmpl",
+		"auth/session/internal/platform/auth/store.go.tmpl",
+		"auth/session/internal/platform/auth/store_test.go.tmpl",
+		"auth/session/internal/platform/audit/audit.go.tmpl",
+		"auth/session/internal/platform/audit/audit_test.go.tmpl",
+		"auth/session/internal/platform/rbac/rbac.go.tmpl",
+		"auth/session/internal/platform/rbac/rbac_test.go.tmpl",
+		"auth/session/internal/app/session_middleware.go.tmpl",
+		"auth/session/internal/app/auth_handlers.go.tmpl",
+		"auth/session/internal/app/admin_handlers.go.tmpl",
+		"auth/session/internal/app/admin_handlers_test.go.tmpl",
+		"auth/session/internal/app/auth_handlers_test.go.tmpl",
+	)
+	if opts.IsPostgres() {
+		files = append(files, mapScaffold("auth/session/",
+			"auth/session/internal/app/session_postgres_test.go.tmpl",
+			"auth/session/internal/platform/auth/ratelimit_postgres.go.tmpl",
+			"auth/session/internal/platform/auth/ratelimit_postgres_test.go.tmpl",
+		)...)
+	}
+	return files
 }
 
 func mapScaffold(prefix string, sources ...string) []scaffoldFile {

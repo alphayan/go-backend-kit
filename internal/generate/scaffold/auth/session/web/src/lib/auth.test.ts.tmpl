@@ -1,0 +1,14 @@
+import { afterEach, expect, it, vi } from "vitest"
+import { loadSession, login, useAuth } from "./auth"
+
+afterEach(() => vi.unstubAllGlobals())
+
+it("uses the server id field for the current user and refreshes revoked sessions", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: { id: 42, email: "admin@example.com", role: "admin" } }), { status: 200 })))
+  const identity = await login("admin@example.com", "test password")
+  expect(identity.id).toBe(42)
+  expect(useAuth().identity.value?.id).toBe(42)
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { code: "unauthorized", message: "authentication required" } }), { status: 401 })))
+  await expect(loadSession(true)).resolves.toBeNull()
+  expect(useAuth().identity.value).toBeNull()
+})

@@ -1,0 +1,118 @@
+package app
+
+import (
+	"io"
+	"log/slog"
+	"net/http"
+	"os"
+	"sync"
+	"testing"
+	"time"
+
+	"{{.Module}}/internal/platform/auth"
+	"{{.Module}}/internal/platform/config"
+{{if .Options.IsProduction}}	"{{.Module}}/internal/platform/observability"
+{{end}}	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+)
+
+func TestPostgresSessionAuthenticationE2E(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if err != nil { t.Fatal(err) }
+	if err := db.Exec("TRUNCATE auth_audit_logs, auth_sessions, auth_users RESTART IDENTITY CASCADE").Error; err != nil { t.Fatal(err) }
+	t.Cleanup(func() { _ = db.Exec("TRUNCATE auth_audit_logs, auth_sessions, auth_users RESTART IDENTITY CASCADE").Error })
+	t.Run("admin lifecycle", func(t *testing.T) { runAdminUserLifecycleAndAudit(t, db) })
+	if err := db.Exec("TRUNCATE auth_audit_logs, auth_sessions, auth_users RESTART IDENTITY CASCADE").Error; err != nil { t.Fatal(err) }
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	passwords, err := auth.NewPasswordManager(auth.DefaultPasswordParams(), 16)
+	if err != nil { t.Fatal(err) }
+	store := auth.NewStore(db)
+	admin := createSessionTestUser(t, store, passwords, "admin@example.com", "admin", "correct horse battery staple")
+	cfg := config.Config{RequestTimeout: 15 * time.Second, AuthSessionTTL: time.Hour, AuthSessionIdleTimeout: 30 * time.Minute, AuthLoginRateLimit: 100, AuthLoginRateWindow: time.Minute}
+{{if .Options.IsProduction}}	metrics := observability.New(nil)
+{{end}}	t.Run("shared login and logout budgets", func(t *testing.T) {
+		if err := db.Exec("DELETE FROM auth_rate_limits").Error; err != nil { t.Fatal(err) }
+		t.Cleanup(func() { if err := db.Exec("DELETE FROM auth_rate_limits").Error; err != nil { t.Error(err) } })
+		limitedCfg := cfg
+		limitedCfg.AuthLoginRateLimit = 1
+		firstApp := New(limitedCfg, db, logger{{if .Options.IsProduction}}, metrics{{end}}, store, passwords)
+		secondApp := New(limitedCfg, db, logger{{if .Options.IsProduction}}, metrics{{end}}, store, passwords)
+		payload := map[string]string{"email": "missing@example.test", "password": "wrong"}
+		if response := sessionRequest(firstApp, http.MethodPost, "/auth/login", payload, nil, nil); response.Code != http.StatusUnauthorized { t.Fatalf("first login = %d: %s", response.Code, response.Body.String()) }
+		for _, path := range []string{"/auth/login", "/auth/logout"} {
+			if response := sessionRequest(secondApp, http.MethodPost, path, payload, nil, nil); response.Code != http.StatusTooManyRequests { t.Fatalf("second instance %s = %d: %s", path, response.Code, response.Body.String()) }
+		}
+		closedDB, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+		if err != nil { t.Fatal(err) }
+		pool, err := closedDB.DB()
+		if err != nil { t.Fatal(err) }
+		if err := pool.Close(); err != nil { t.Fatal(err) }
+		brokenApp := New(limitedCfg, closedDB, logger{{if .Options.IsProduction}}, metrics{{end}}, auth.NewStore(closedDB), passwords)
+		if response := sessionRequest(brokenApp, http.MethodPost, "/auth/login", payload, nil, nil); response.Code != http.StatusInternalServerError { t.Fatalf("database outage login = %d: %s", response.Code, response.Body.String()) }
+	})
+	e := New(cfg, db, logger{{if .Options.IsProduction}}, metrics{{end}}, store, passwords)
+
+	login := sessionRequest(e, http.MethodPost, "/auth/login", map[string]string{"email": admin.Email, "password": "correct horse battery staple"}, nil, nil)
+	if login.Code != http.StatusOK { t.Fatalf("login status = %d, body = %s", login.Code, login.Body.String()) }
+	cookie := login.Result().Cookies()[0]
+	if response := sessionRequest(e, http.MethodGet, "/api/v1/products", nil, cookie, nil); response.Code != http.StatusOK {
+		t.Fatalf("authorized product list status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if err := store.DisableUser(t.Context(), admin.ID, time.Now().UTC()); err != nil { t.Fatal(err) }
+	if response := sessionRequest(e, http.MethodGet, "/auth/me", nil, cookie, nil); response.Code != http.StatusUnauthorized {
+		t.Fatalf("disabled user status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	user := createSessionTestUser(t, store, passwords, "cascade@example.com", "viewer", "correct horse battery staple")
+	digest := make([]byte, 32)
+	if err := db.Create(&auth.Session{UserID: user.ID, TokenDigest: digest, ExpiresAt: time.Now().Add(time.Hour), LastSeenAt: time.Now(), UserAgent: "test", IP: "127.0.0.1"}).Error; err != nil { t.Fatal(err) }
+	if err := db.Create(&auth.Session{UserID: user.ID, TokenDigest: digest, ExpiresAt: time.Now().Add(time.Hour), LastSeenAt: time.Now(), UserAgent: "test", IP: "127.0.0.1"}).Error; err == nil {
+		t.Fatal("duplicate token_digest was accepted")
+	}
+	if err := db.Delete(&auth.User{}, user.ID).Error; err != nil { t.Fatal(err) }
+	var sessions int64
+	if err := db.Model(&auth.Session{}).Where("user_id = ?", user.ID).Count(&sessions).Error; err != nil { t.Fatal(err) }
+	if sessions != 0 { t.Fatalf("cascade left %d sessions", sessions) }
+
+	concurrent := createSessionTestUser(t, store, passwords, "concurrent@example.com", "admin", "correct horse battery staple")
+	var wg sync.WaitGroup
+	statuses := make(chan int, 8)
+	for range 8 {
+		wg.Go(func() {
+			response := sessionRequest(e, http.MethodPost, "/auth/login", map[string]string{"email": concurrent.Email, "password": "correct horse battery staple"}, nil, nil)
+			statuses <- response.Code
+		})
+	}
+	wg.Wait()
+	close(statuses)
+	for status := range statuses {
+		if status != http.StatusOK { t.Fatalf("concurrent login status = %d", status) }
+	}
+	if err := db.Model(&auth.Session{}).Where("user_id = ?", concurrent.ID).Count(&sessions).Error; err != nil { t.Fatal(err) }
+	if sessions != 8 { t.Fatalf("concurrent sessions = %d, want 8", sessions) }
+
+	first := createSessionTestUser(t, store, passwords, "first@example.com", "admin", "correct horse battery staple")
+	second := createSessionTestUser(t, store, passwords, "second@example.com", "admin", "correct horse battery staple")
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, pair := range [][2]int64{ {first.ID, second.ID}, {second.ID, first.ID} } {
+		wg.Go(func() {
+			<-start
+			_, err := store.AdminUpdateUser(t.Context(), pair[0], pair[1], new("viewer"), nil, time.Now().UTC())
+			results <- err
+		})
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	successes, denied := 0, 0
+	for err := range results {
+		if err == nil { successes++ } else if err == auth.ErrAdminRequired { denied++ } else { t.Fatalf("concurrent role change: %v", err) }
+	}
+	if successes != 1 || denied != 1 { t.Fatalf("mutual demotion: %d succeeded, %d denied", successes, denied) }
+}

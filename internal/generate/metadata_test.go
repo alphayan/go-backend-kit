@@ -29,6 +29,9 @@ func TestEncodeAndParseProjectMetadata(t *testing.T) {
 			t.Errorf("metadata missing %s:\n%s", want, data)
 		}
 	}
+	if !strings.Contains(string(data), "\"profile\": \"personal\"") {
+		t.Fatalf("metadata missing personal profile:\n%s", data)
+	}
 	meta, err := parseProjectMetadata(data)
 	if err != nil {
 		t.Fatal(err)
@@ -42,6 +45,47 @@ func TestEncodeAndParseProjectMetadata(t *testing.T) {
 	}
 	if meta.Fingerprint != wantFingerprint {
 		t.Fatalf("fingerprint = %q, want %q", meta.Fingerprint, wantFingerprint)
+	}
+}
+
+func TestEncodeProjectMetadataDefaultsToCurrentVersion(t *testing.T) {
+	data, err := encodeProjectMetadata("", DefaultProjectOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, err := parseProjectMetadata(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.GeneratorVersion != CurrentVersion {
+		t.Fatalf("generator version = %q, want %q", meta.GeneratorVersion, CurrentVersion)
+	}
+}
+
+func TestParseProjectMetadataAcceptsLegacySelectionWithoutProfile(t *testing.T) {
+	opts := DefaultProjectOptions()
+	legacy := projectMetadata{
+		GeneratedBy:      projectMetadataOwner,
+		SchemaVersion:    projectMetadataSchemaVersion,
+		GeneratorVersion: "v0.1.0",
+		Selection:        opts,
+	}
+	legacy.Selection.Profile = ""
+	fingerprint, err := legacy.Selection.legacyFingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.Fingerprint = fingerprint
+	data, err := marshalJSON(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := parseProjectMetadata(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Selection.Profile != ProfilePersonal {
+		t.Fatalf("legacy profile = %q, want %q", parsed.Selection.Profile, ProfilePersonal)
 	}
 }
 

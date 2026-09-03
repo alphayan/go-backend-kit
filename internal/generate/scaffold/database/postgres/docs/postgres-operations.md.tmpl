@@ -1,0 +1,41 @@
+# PostgreSQL production operations / PostgreSQL 生产操作
+
+This guide targets the generated, project-private Compose database, not an existing shared cluster. Commands below are explicit operator actions; the API never migrates, grants privileges or restores data.
+
+本指南适用于生成项目独立的 Compose 数据库。不是已有共享集群的自动改造脚本。以下操作须由运维人员显式执行；API 不负责迁移、授权或恢复。
+
+## First initialization / 首次初始化
+
+1. Copy `.env.example` to `.env` and `.env.postgres.example` to `.env.postgres`; set both to mode `600`. Never commit or print either file.
+2. Put three different random passwords of at least 20 bytes in `.env.postgres` (e.g. generate each with `openssl rand -hex 32`). PostgreSQL alone receives this file. Do not source it as shell code. Do not put these variables or `ATLAS_DATABASE_URL` in the API's `.env`.
+3. Set `.env`'s `DATABASE_URL` to `postgres://app_runtime:<URL-encoded runtime password>@postgres:5432/app?sslmode=disable`. URL-encode special password characters; a random hex password needs no escaping. The internal hostname is `postgres`; host-side tools use `localhost:5432`. Set a unique Grafana password and any session bootstrap credentials in `.env`.
+4. Run `docker compose up -d postgres`. The empty-volume initialization creates `app_migrator` (database/schema owner, no cluster administration) and `app_runtime` (CRUD and sequence access only). Runtime has a 50-connection role limit; the default API pool is 25. Keep the sum of all instance pools below the role/server limit and reserve administrative capacity. Change these budgets explicitly if needed.
+5. Generate with `make migration name=initial`, inspect the SQL, and commit it through your normal review process. Obtain the migration DSN through your secret manager as `ATLAS_DATABASE_URL` using `app_migrator` and the host-side address, then run `make migrate-apply`. Unset that variable afterwards. The wrapper never falls back to runtime credentials in production. Do not put a secret directly in shell history.
+6. Only after the migration succeeds, run `make up`. Configure your external TLS/HSTS reverse proxy before browser use. Production Session cookies deliberately do not work over plain HTTP.
+
+首次启动必须先填凭据、启动 PostgreSQL，再审查并执行迁移，最后启动 API。只读 `make compose-config` 静默验证配置；不要分享 `docker compose config` 的完整输出，它会展开秘密。应用启动会拒绝超级用户、DDL/owner 权限、可继承或切换到的高权限角色及迁移账本写权限。该检查防止误配置，不能抵御数据库管理员在启动后重新授权。
+
+The Atlas ledger is always in `atlas_schema_revisions`, outside the `public` business schema. Default ACLs apply only to new objects created by `app_migrator`; runtime cannot access the ledger. Reviewed custom migrations must preserve this boundary. Applications are allowed to modify all generated business/auth tables; this is not tenant-level database isolation.
+
+## Backup and restore / 备份恢复
+
+```sh
+./scripts/postgres-backup.sh /absolute/secure-backup-location/app-unique.dump
+./scripts/postgres-restore.sh /absolute/secure-backup-location/app-unique.dump app_restore_unique
+```
+
+The backup uses native `pg_dump --format=custom`, includes the migration ledger, ACLs and default ACLs, and creates a mode-600 file without overwriting existing paths. Treat the archive as sensitive: it includes application data and password hashes. These scripts do not back up other databases or cluster-global roles. The two fixed application roles are recreated by the initialization hook; if you have added roles, also arrange a protected native `pg_dumpall --globals-only` backup and review its restore separately.
+
+Restore accepts only a trusted archive and creates a **new** `app_restore_*` database in this project's cluster. Existing targets are refused, never cleaned or dropped. Native `pg_restore --single-transaction --no-owner` restores objects as the migration owner while retaining ACL/default-ACL entries for the fixed roles. Runtime CONNECT is granted only after success. A failed restore leaves the isolated new database for inspection; it does not modify the source database. Restoring arbitrary/untrusted dumps can execute SQL as the migration role.
+
+After restoring, connect the runtime role to the new database and verify representative row counts, inserts/sequence values, DDL denial, ledger denial, and Atlas migration status. Take a backup immediately before a risky change and rehearse rollback/cutover to a restored database. Changing the application DSN and cutting traffic over are separate, explicitly authorized deployment actions; these scripts never do them.
+
+必须把备份复制到独立主机或异地、加密并限制访问，按业务 RPO 设置执行频率与保留策略，并定期在独立集群演练恢复。当前仓库提供本地导出/新库恢复，不会猜测远端存储地址、自动上传或注册定时任务。仅在同一主机上保存 dump 或 Docker volume 均不构成异地备份。实际异地落地仍需配置具体目标并验证读回恢复。
+
+## Existing volumes / 已有数据卷
+
+The official PostgreSQL image runs initialization hooks **only on an empty volume**. Replacing a template, password env value or image does not migrate existing roles, rotate stored passwords or repair a partially initialized database. Re-running this hook against existing roles fails rather than silently accepting unsafe state. The runtime startup check rejects the old `app` superuser configuration.
+
+已有项目必须先备份并验证恢复。推荐在新项目/新集群创建隔离角色，将可信备份恢复到新库，审核并重建现有对象 owner/ACL/default ACL、固定迁移账本位置，完成运行角色验证后另行批准切换。旧账本位于 `public` 时必须协调移动和 Atlas 状态，不能直接重新 apply。不要执行 `down -v`、删卷或删库来“修复”已有部署。共享集群需为每个项目单独规划数据库和唯一角色名，不要复用本独立 Compose 集群的固定角色名。
+
+References: [PostgreSQL privileges](https://www.postgresql.org/docs/18/ddl-priv.html), [default privileges](https://www.postgresql.org/docs/18/sql-alterdefaultprivileges.html), [pg_restore](https://www.postgresql.org/docs/18/app-pgrestore.html), [Atlas revisions](https://atlasgo.io/versioned/apply), [official image initialization](https://hub.docker.com/_/postgres).

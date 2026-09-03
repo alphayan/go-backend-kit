@@ -1,19 +1,92 @@
-{{if or .Options.IsPostgres .Options.HasRedis .Options.HasNATS}}services:
-{{if .Options.IsPostgres}}  postgres:
-    image: {{.Pins.PostgresImage}}
+{{if or .Options.IsProduction .Options.IsPostgres .Options.HasRedis .Options.HasNATS}}services:
+{{if .Options.IsProduction}}  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
     environment:
+      HTTP_ADDRESS: ":8080"
+{{if .Options.IsPostgres}}      DATABASE_URL: ${DATABASE_URL:?Set the runtime DATABASE_URL in .env}
+{{end}}{{if .Options.IsSQLite}}      DATABASE_PATH: /app/data/app.db
+{{end}}{{if .Options.HasRedis}}      REDIS_URL: redis://redis:6379/0
+{{end}}{{if .Options.HasNATS}}      NATS_URL: nats://nats:4222
+{{end}}    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:8080/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+{{if and .Options.IsProduction .Options.IsSQLite}}    volumes:
+      - app-data:/app/data
+{{end}}{{if or .Options.IsPostgres .Options.HasRedis .Options.HasNATS}}    depends_on:
+{{if .Options.IsPostgres}}      postgres:
+        condition: service_healthy
+{{end}}{{if .Options.HasRedis}}      redis:
+        condition: service_healthy
+{{end}}{{if .Options.HasNATS}}      nats:
+        condition: service_healthy
+{{end}}{{end}}
+{{end}}{{if .Options.IsProduction}}  prometheus:
+    image: {{.Pins.PrometheusImage}}
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+  grafana:
+    image: {{.Pins.GrafanaImage}}
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_PATHS_DATA: /var/lib/grafana-data
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana-data
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      prometheus:
+        condition: service_started
+    restart: unless-stopped
+{{end}}{{if .Options.IsPostgres}}  postgres:
+    image: {{.Pins.PostgresImage}}
+{{if .Options.IsProduction}}    env_file:
+      - .env.postgres
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: postgres
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+{{else}}    environment:
       POSTGRES_DB: app
       POSTGRES_USER: app
       POSTGRES_PASSWORD: app
+{{end}}
     ports:
       - "127.0.0.1:5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      test: ["CMD-SHELL", "pg_isready -U {{if .Options.IsProduction}}postgres{{else}}app{{end}} -d app"]
       interval: 2s
       timeout: 3s
       retries: 20
     volumes:
       - postgres-data:/var/lib/postgresql
+{{if .Options.IsProduction}}      - ./scripts/postgres-init.sh:/docker-entrypoint-initdb.d/10-app.sh:ro
+{{end}}
 {{end}}{{if .Options.HasRedis}}  redis:
     image: {{.Pins.RedisImage}}
     command: ["redis-server", "--protected-mode", "yes", "--bind", "0.0.0.0"]
@@ -33,7 +106,9 @@
       interval: 2s
       timeout: 3s
       retries: 20
-{{end}}{{if .Options.IsPostgres}}
-volumes:
-  postgres-data:
-{{end}}{{end}}
+{{end}}{{if or .Options.IsPostgres (and .Options.IsProduction .Options.IsSQLite)}}volumes:
+{{if .Options.IsPostgres}}  postgres-data:
+{{end}}{{if and .Options.IsProduction .Options.IsSQLite}}  app-data:
+{{end}}{{if .Options.IsProduction}}  prometheus-data:
+  grafana-data:
+{{end}}{{end}}{{end}}

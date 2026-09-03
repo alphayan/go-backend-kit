@@ -1,0 +1,57 @@
+package auth
+
+import (
+	"fmt"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestLoginLimiterReservesConcurrentEmailAttempts(t *testing.T) {
+	limiter := NewLoginLimiter(NewStore(authTestDB(t)), 2, time.Minute)
+	now := time.Now()
+	results := make(chan bool, 32)
+	var wg sync.WaitGroup
+	for i := range 32 {
+		wg.Go(func() {
+			allowed, err := limiter.Allow(t.Context(), fmt.Sprint(i), " Admin@Example.com ", now)
+			if err != nil { t.Error(err) }
+			results <- allowed
+		})
+	}
+	wg.Wait()
+	close(results)
+	admitted := 0
+	for allowed := range results { if allowed { admitted++ } }
+	if admitted != 6 { t.Fatalf("email attempts admitted = %d, want 6", admitted) }
+	if err := limiter.ClearEmail(t.Context(), "admin@example.com"); err != nil { t.Fatal(err) }
+	if allowed, err := limiter.Allow(t.Context(), "new-ip", "admin@example.com", now); err != nil || !allowed {
+		t.Fatalf("clear email: allowed=%v, err=%v", allowed, err)
+	}
+}
+
+func TestFixedWindowLimiterAndEviction(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	limiter := newFixedWindowLRU(2, time.Minute, 2)
+	if !limiter.Take("a", now) || !limiter.Take("a", now) || limiter.Take("a", now) {
+		t.Fatal("fixed window limit not enforced")
+	}
+	if !limiter.Take("b", now) || !limiter.Take("c", now) {
+		t.Fatal("new keys were not admitted")
+	}
+	if len(limiter.entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(limiter.entries))
+	}
+	if !limiter.Take("a", now) {
+		t.Fatal("least-recently-used key was not evicted")
+	}
+	if !limiter.Take("a", now.Add(time.Minute)) {
+		t.Fatal("closed window was not reset")
+	}
+	for i := range rateLimitKeyCapacity + 100 {
+		limiter.Take(fmt.Sprint(i), now.Add(2*time.Minute))
+	}
+	if len(limiter.entries) > limiter.capacity {
+		t.Fatalf("entries = %d, capacity = %d", len(limiter.entries), limiter.capacity)
+	}
+}

@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+
+# Official-image hook for an EMPTY volume only; never an in-place role migration.
+: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.postgres}"
+: "${POSTGRES_MIGRATOR_PASSWORD:?Set POSTGRES_MIGRATOR_PASSWORD in .env.postgres}"
+: "${POSTGRES_RUNTIME_PASSWORD:?Set POSTGRES_RUNTIME_PASSWORD in .env.postgres}"
+if [ "${#POSTGRES_PASSWORD}" -lt 20 ] || [ "${#POSTGRES_MIGRATOR_PASSWORD}" -lt 20 ] || [ "${#POSTGRES_RUNTIME_PASSWORD}" -lt 20 ]; then
+  echo 'All database passwords must be at least 20 bytes' >&2
+  exit 1
+fi
+if [ "$POSTGRES_PASSWORD" = "$POSTGRES_MIGRATOR_PASSWORD" ] || [ "$POSTGRES_PASSWORD" = "$POSTGRES_RUNTIME_PASSWORD" ] || [ "$POSTGRES_MIGRATOR_PASSWORD" = "$POSTGRES_RUNTIME_PASSWORD" ]; then
+  echo 'Database passwords must be different' >&2
+  exit 1
+fi
+
+# psql quotes values as SQL literals; passwords never become SQL or shell syntax.
+psql -X --username postgres --dbname app --set ON_ERROR_STOP=1 <<'SQL'
+-- Scope these settings to this bootstrap connection: failed CREATE ROLE must not
+-- copy its password-bearing statement to the server log (including repeat runs).
+SET log_statement = 'none';
+SET log_min_error_statement = 'panic';
+SET log_min_duration_statement = -1;
+SET log_min_duration_sample = -1;
+\getenv migrator_password POSTGRES_MIGRATOR_PASSWORD
+\getenv runtime_password POSTGRES_RUNTIME_PASSWORD
+BEGIN;
+CREATE ROLE app_migrator LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 5 PASSWORD :'migrator_password';
+CREATE ROLE app_runtime LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 50 PASSWORD :'runtime_password';
+ALTER DATABASE app OWNER TO app_migrator;
+REVOKE ALL ON DATABASE app FROM PUBLIC;
+GRANT CONNECT ON DATABASE app TO app_runtime;
+ALTER SCHEMA public OWNER TO app_migrator;
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
+GRANT USAGE ON SCHEMA public TO app_runtime;
+ALTER DEFAULT PRIVILEGES FOR ROLE app_migrator IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_runtime;
+ALTER DEFAULT PRIVILEGES FOR ROLE app_migrator IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO app_runtime;
+ALTER DEFAULT PRIVILEGES FOR ROLE app_migrator REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+COMMIT;
+SQL

@@ -1,0 +1,13 @@
+package rbac
+
+import "testing"
+
+func TestRolePermissionsAllows(t *testing.T) {
+	permissions := RolePermissions{"viewer": {"product.read": {}}}
+	if !permissions.Allows("viewer", "product.read") {
+		t.Fatal("known permission denied")
+	}
+	if permissions.Allows("viewer", "product.update") || permissions.Allows("unknown", "product.read") {
+		t.Fatal("unknown role or permission allowed")
+	}
+}

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+{{if .Options.IsProduction}}	"strings"
+{{end}}
 	"syscall"
 
 	slogzap "github.com/samber/slog-zap/v2"
@@ -14,10 +16,38 @@ import (
 func New() (*slog.Logger, func() error, error) {
 	config := zap.NewProductionEncoderConfig()
 	config.TimeKey = "time"
-	zapLogger := zap.New(zapcore.NewCore(zapcore.NewJSONEncoder(config), zapcore.AddSync(os.Stdout), zap.InfoLevel))
-	logger := slog.New(slogzap.Option{Level: slog.LevelInfo, Logger: zapLogger}.NewZapHandler())
+	zapLogger := zap.New(zapcore.NewCore(zapcore.NewJSONEncoder(config), zapcore.AddSync(os.Stdout), {{if .Options.IsProduction}}zapLevel(){{else}}zap.InfoLevel{{end}}))
+	logger := slog.New(slogzap.Option{Level: {{if .Options.IsProduction}}slogLevel(){{else}}slog.LevelInfo{{end}}, Logger: zapLogger}.NewZapHandler())
 	return logger, func() error { return flushSync(zapLogger.Sync) }, nil
 }
+
+{{if .Options.IsProduction}}
+func slogLevel() slog.Level {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("LOG_LEVEL"))) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+func zapLevel() zapcore.Level {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("LOG_LEVEL"))) {
+	case "debug":
+		return zap.DebugLevel
+	case "warn", "warning":
+		return zap.WarnLevel
+	case "error":
+		return zap.ErrorLevel
+	default:
+		return zap.InfoLevel
+	}
+}
+{{end}}
 
 func flushSync(sync func() error) error {
 	err := sync()

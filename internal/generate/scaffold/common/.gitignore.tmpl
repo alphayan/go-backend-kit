@@ -1,5 +1,14 @@
 .env
+.env.postgres
+backups/
+*.dump
 .gobackend/
 bin/
 coverage.out
 data/
+node_modules/
+{{if .Options.HasSession}}test-results/
+playwright-report/
+{{end}}
+web/dist/*
+!web/dist/.gitkeep

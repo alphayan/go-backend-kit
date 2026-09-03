@@ -11,6 +11,8 @@ import (
 	"{{.Module}}/internal/generated"
 	"{{.Module}}/internal/platform/config"
 	"{{.Module}}/internal/platform/httpx"
+{{if .Options.IsProduction}}	"{{.Module}}/internal/platform/observability"
+{{end}}
 	"{{.Module}}/openapi"
 {{if .Options.HasJWT}}	"{{.Module}}/internal/platform/apperror"
 	"{{.Module}}/internal/platform/auth"
@@ -26,7 +28,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func New(cfg config.Config, db *gorm.DB, logger *slog.Logger{{if .Options.HasJWT}}, verifier *auth.Verifier{{end}}{{if .Options.HasRedis}}, redisClient *redis.Client{{end}}{{if .Options.HasNATS}}, natsConn *nats.Conn{{end}}) *fiber.App {
+func New(cfg config.Config, db *gorm.DB, logger *slog.Logger{{if .Options.IsProduction}}, metrics *observability.Metrics{{end}}{{if .Options.HasJWT}}, verifier *auth.Verifier{{end}}{{if .Options.HasRedis}}, redisClient *redis.Client{{end}}{{if .Options.HasNATS}}, natsConn *nats.Conn{{end}}) *fiber.App {
 	app := fiber.New(fiber.Config{
 		BodyLimit:    1 << 20,
 		ReadTimeout:  20 * time.Second,
@@ -48,7 +50,7 @@ func New(cfg config.Config, db *gorm.DB, logger *slog.Logger{{if .Options.HasJWT
 	if len(cfg.CORSOrigins) > 0 {
 		app.Use(cors.New(cors.Config{AllowOrigins: cfg.CORSOrigins}))
 	}
-	app.Use(requestLogger(logger))
+	app.Use(requestLogger(logger{{if .Options.IsProduction}}, metrics{{end}}))
 
 	app.Get("/health/live", func(c fiber.Ctx) error {
 		return httpx.WriteData(c, http.StatusOK, map[string]string{"status": "ok"})
@@ -76,7 +78,8 @@ func New(cfg config.Config, db *gorm.DB, logger *slog.Logger{{if .Options.HasJWT
 		}
 {{end}}		return httpx.WriteData(c, http.StatusOK, map[string]string{"status": "ready"})
 	})
-	app.Get("/openapi.json", func(c fiber.Ctx) error {
+{{if .Options.IsProduction}}	app.Get("/metrics", adaptor.HTTPHandler(metrics.Handler()))
+{{end}}	app.Get("/openapi.json", func(c fiber.Ctx) error {
 		return c.Status(http.StatusOK).Type("json").Send(openapi.Spec)
 	})
 	docs := adaptor.HTTPHandler(v5emb.New("Generated Backend API", "/openapi.json", "/docs"))
@@ -88,16 +91,25 @@ func New(cfg config.Config, db *gorm.DB, logger *slog.Logger{{if .Options.HasJWT
 	return app
 }
 
-func requestLogger(logger *slog.Logger) fiber.Handler {
+func requestLogger(logger *slog.Logger{{if .Options.IsProduction}}, metrics *observability.Metrics{{end}}) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		start := time.Now()
-		err := c.Next()
+{{if .Options.IsProduction}}		metrics.BeginRequest()
+{{end}}		err := c.Next()
+		duration := time.Since(start)
+		route := ""
+		if currentRoute := c.Route(); currentRoute != nil {
+			route = currentRoute.Path
+		}
+{{if .Options.IsProduction}}		metrics.ObserveHTTP(c.Method(), route, c.Response().StatusCode(), duration)
+{{end}}
 		logger.LogAttrs(c.Context(), slog.LevelInfo, "http_request",
 			slog.String("method", c.Method()),
+			slog.String("route", route),
 			slog.String("path", c.Path()),
 			slog.Int("status", c.Response().StatusCode()),
 			slog.String("request_id", requestid.FromContext(c)),
-			slog.Int64("duration_ms", time.Since(start).Milliseconds()),
+			slog.Int64("duration_ms", duration.Milliseconds()),
 		)
 		return err
 	}

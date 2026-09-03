@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+umask 077
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+if [ "$#" -ne 1 ]; then
+  echo 'usage: scripts/postgres-backup.sh /absolute/path/to/new-backup.dump' >&2
+  exit 1
+fi
+destination=$1
+case "$destination" in /*) ;; *) echo 'Backup path must be absolute' >&2; exit 1 ;; esac
+if [ -e "$destination" ] || [ -L "$destination" ]; then
+  echo 'Refusing to replace an existing backup path' >&2
+  exit 1
+fi
+temporary=$(mktemp "$(dirname -- "$destination")/.gobackend-backup.XXXXXX")
+trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+docker compose exec -T postgres sh -c '
+  export PGPASSWORD="$POSTGRES_MIGRATOR_PASSWORD"
+  exec pg_dump -h 127.0.0.1 -U app_migrator -d app --format=custom
+' > "$temporary"
+# Hard-link installation is atomic and fails if the destination appeared meanwhile.
+ln -- "$temporary" "$destination"
+echo 'Backup saved; copy it to independent encrypted storage and verify a restore.'

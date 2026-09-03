@@ -1,0 +1,68 @@
+package auth
+
+import (
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"errors"
+	"time"
+
+	"gorm.io/gorm"
+)
+
+// RateLimit is explicitly migrated by Atlas, never by application startup.
+// Digests avoid storing raw IPs/emails; they are not anonymization.
+type RateLimit struct {
+	Kind      string    `gorm:"size:5;primaryKey"`
+	KeyDigest string    `gorm:"size:64;primaryKey"`
+	Count     int       `gorm:"not null"`
+	ExpiresAt time.Time `gorm:"not null;index"`
+}
+
+func (RateLimit) TableName() string { return "auth_rate_limits" }
+
+func (l *LoginLimiter) allowShared(ctx context.Context, ip, email string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	allowed := false
+	err := l.store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// ponytail: one short table lock bounds keys and serializes reservations;
+		// move to a dedicated shared limiter only if measured login contention warrants it.
+		// Password hashing and session creation happen AFTER this transaction commits.
+		if err := tx.Exec("LOCK TABLE auth_rate_limits IN EXCLUSIVE MODE").Error; err != nil { return err }
+		var now time.Time
+		if err := tx.Raw("SELECT clock_timestamp()").Scan(&now).Error; err != nil { return err }
+		if err := tx.Where("expires_at <= ?", now).Delete(&RateLimit{}).Error; err != nil { return err }
+		var err error
+		allowed, err = l.takeShared(tx, "ip", ip, l.ip.limit, now)
+		if err != nil || !allowed || email == "" { return err }
+		allowed, err = l.takeShared(tx, "email", email, l.email.limit, now)
+		return err
+	}, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	return allowed && err == nil, err
+}
+
+// The caller holds the table lock through commit. New keys are denied at
+// capacity, never admitted by evicting another key's unexpired budget.
+func (l *LoginLimiter) takeShared(tx *gorm.DB, kind, key string, limit int, now time.Time) (bool, error) {
+	digest := rateKeyDigest(key)
+	var row RateLimit
+	err := tx.Where("kind = ? AND key_digest = ?", kind, digest).Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		var count int64
+		if err := tx.Model(&RateLimit{}).Where("kind = ?", kind).Count(&count).Error; err != nil { return false, err }
+		if count >= rateLimitKeyCapacity { return false, nil }
+		err = tx.Create(&RateLimit{Kind: kind, KeyDigest: digest, Count: 1, ExpiresAt: now.Add(l.ip.window)}).Error
+		return err == nil, err
+	}
+	if err != nil { return false, err }
+	if row.Count >= limit { return false, nil }
+	err = tx.Model(&row).Update("count", row.Count+1).Error
+	return err == nil, err
+}
+
+func rateKeyDigest(key string) string {
+	digest := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(digest[:])
+}

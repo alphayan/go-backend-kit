@@ -13,9 +13,25 @@ type envLookup func(string) string
 
 type Config struct {
 	Address        string
-	CORSOrigins    []string
+{{if .Options.IsProduction}}	ServiceName    string
+	Environment    string
+	BuildVersion   string
+{{end}}	CORSOrigins    []string
 	RequestTimeout time.Duration
-{{if .Options.IsPostgres}}	DatabaseURL                   string
+{{if .Options.HasSession}}	Warnings                      []string
+	AuthSessionSecure             bool
+	AuthSessionTTL                time.Duration
+	AuthSessionIdleTimeout        time.Duration
+	AuthPasswordArgon2MemoryKiB   uint32
+	AuthPasswordArgon2Time        uint32
+	AuthPasswordArgon2Parallelism uint8
+	AuthPasswordHashConcurrency   int
+	AuthLoginRateLimit            int
+	AuthLoginRateWindow           time.Duration
+	AuthAuditRetentionDays        int
+	AuthBootstrapEmail            string
+	AuthBootstrapPassword         string
+{{end}}{{if .Options.IsPostgres}}	DatabaseURL                   string
 	DatabaseMaxOpenConnections    int
 	DatabaseMaxIdleConnections    int
 	DatabaseConnectionMaxLifetime time.Duration
@@ -40,7 +56,10 @@ func Load() (Config, error) { return load(os.Getenv) }
 func load(getenv envLookup) (Config, error) {
 	cfg := Config{
 		Address:        envOr(getenv, "HTTP_ADDRESS", ":8080"),
-		RequestTimeout: 15 * time.Second,
+{{if .Options.IsProduction}}		ServiceName:    envOr(getenv, "SERVICE_NAME", "generated-api"),
+		Environment:    envOr(getenv, "ENVIRONMENT", "development"),
+		BuildVersion:   envOr(getenv, "BUILD_VERSION", "dev"),
+{{end}}		RequestTimeout: 15 * time.Second,
 	}
 	if raw := strings.TrimSpace(getenv("CORS_ORIGINS")); raw != "" {
 		for origin := range strings.SplitSeq(raw, ",") {
@@ -148,6 +167,70 @@ func load(getenv envLookup) (Config, error) {
 	if cfg.NATSURL == "" {
 		return Config{}, errors.New("NATS_URL is required")
 	}
+{{end}}{{if .Options.HasSession}}	secure, err := boolEnv(getenv, "AUTH_SESSION_SECURE", {{if .Options.IsProduction}}true{{else}}false{{end}})
+	if err != nil { return Config{}, err }
+	ttl, err := durationEnv(getenv, "AUTH_SESSION_TTL", 24*time.Hour)
+	if err != nil { return Config{}, err }
+	idleTimeout, err := durationEnv(getenv, "AUTH_SESSION_IDLE_TIMEOUT", 2*time.Hour)
+	if err != nil { return Config{}, err }
+	memoryKiB, err := intEnv(getenv, "AUTH_PASSWORD_ARGON2_MEMORY_KIB", 19456)
+	if err != nil { return Config{}, err }
+	argonTime, err := intEnv(getenv, "AUTH_PASSWORD_ARGON2_TIME", 2)
+	if err != nil { return Config{}, err }
+	parallelism, err := intEnv(getenv, "AUTH_PASSWORD_ARGON2_PARALLELISM", 1)
+	if err != nil { return Config{}, err }
+	hashConcurrency, err := intEnv(getenv, "AUTH_PASSWORD_HASH_CONCURRENCY", 4)
+	if err != nil { return Config{}, err }
+	loginRateLimit, err := intEnv(getenv, "AUTH_LOGIN_RATE_LIMIT", 5)
+	if err != nil { return Config{}, err }
+	loginRateWindow, err := durationEnv(getenv, "AUTH_LOGIN_RATE_WINDOW", 15*time.Minute)
+	if err != nil { return Config{}, err }
+	auditRetentionDays, err := intEnv(getenv, "AUTH_AUDIT_RETENTION_DAYS", 0)
+	if err != nil { return Config{}, err }
+	if auditRetentionDays < 0 || auditRetentionDays > 36500 {
+		return Config{}, errors.New("AUTH_AUDIT_RETENTION_DAYS must be between 0 (disabled) and 36500")
+	}
+	if ttl <= 0 || ttl > 30*24*time.Hour {
+		return Config{}, errors.New("AUTH_SESSION_TTL must be greater than zero and at most 720h")
+	}
+	if idleTimeout <= 0 || idleTimeout > ttl {
+		return Config{}, errors.New("AUTH_SESSION_IDLE_TIMEOUT must be greater than zero and at most AUTH_SESSION_TTL")
+	}
+	if !validArgon2Config(memoryKiB, argonTime, parallelism) {
+		return Config{}, errors.New("Argon2id parameters must match or dominate an OWASP published configuration: m=47104,t=1,p=1; m=19456,t=2,p=1; m=12288,t=3,p=1; m=9216,t=4,p=1; m=7168,t=5,p=1")
+	}
+	if hashConcurrency < 1 || hashConcurrency > 64 {
+		return Config{}, errors.New("AUTH_PASSWORD_HASH_CONCURRENCY must be between 1 and 64")
+	}
+	if loginRateLimit < 1 || loginRateLimit > 1000 {
+		return Config{}, errors.New("AUTH_LOGIN_RATE_LIMIT must be between 1 and 1000")
+	}
+	if loginRateWindow <= 0 || loginRateWindow > 24*time.Hour {
+		return Config{}, errors.New("AUTH_LOGIN_RATE_WINDOW must be greater than zero and at most 24h")
+	}
+{{if .Options.IsProduction}}	if !secure {
+		return Config{}, errors.New("AUTH_SESSION_SECURE must be true for the production profile")
+	}
+{{end}}	bootstrapEmail := strings.TrimSpace(getenv("AUTH_BOOTSTRAP_EMAIL"))
+	bootstrapPassword := getenv("AUTH_BOOTSTRAP_PASSWORD")
+	if (bootstrapEmail == "") != (bootstrapPassword == "") {
+		return Config{}, errors.New("AUTH_BOOTSTRAP_EMAIL and AUTH_BOOTSTRAP_PASSWORD must both be set or both be empty")
+	}
+	cfg.AuthSessionSecure = secure
+	cfg.AuthSessionTTL = ttl
+	cfg.AuthSessionIdleTimeout = idleTimeout
+	cfg.AuthPasswordArgon2MemoryKiB = uint32(memoryKiB)
+	cfg.AuthPasswordArgon2Time = uint32(argonTime)
+	cfg.AuthPasswordArgon2Parallelism = uint8(parallelism)
+	cfg.AuthPasswordHashConcurrency = hashConcurrency
+	cfg.AuthLoginRateLimit = loginRateLimit
+	cfg.AuthLoginRateWindow = loginRateWindow
+	cfg.AuthAuditRetentionDays = auditRetentionDays
+	cfg.AuthBootstrapEmail = bootstrapEmail
+	cfg.AuthBootstrapPassword = bootstrapPassword
+	if len(cfg.CORSOrigins) > 0 {
+		cfg.Warnings = append(cfg.Warnings, "CORS_ORIGINS is set while session authentication rejects cross-origin browser writes; use a same-origin development proxy")
+	}
 {{end}}{{if .Options.HasJWT}}	secret, err := decodeJWTSecret(getenv("AUTH_JWT_SECRET_B64"))
 	if err != nil {
 		return Config{}, err
@@ -199,7 +282,25 @@ func durationEnv(getenv envLookup, name string, fallback time.Duration) (time.Du
 	return value, nil
 }
 
-func envOr(getenv envLookup, name, fallback string) string {
+{{if .Options.HasSession}}func boolEnv(getenv envLookup, name string, fallback bool) (bool, error) {
+	raw := strings.TrimSpace(getenv(name))
+	if raw == "" { return fallback, nil }
+	value, err := strconv.ParseBool(raw)
+	if err != nil { return false, errors.New(name + " must be a boolean") }
+	return value, nil
+}
+
+func validArgon2Config(memoryKiB, iterations, parallelism int) bool {
+	if memoryKiB < 7168 || memoryKiB > 65536 || iterations < 1 || iterations > 10 || parallelism < 1 || parallelism > 16 {
+		return false
+	}
+	recommended := [][3]int{[3]int{47104, 1, 1}, [3]int{19456, 2, 1}, [3]int{12288, 3, 1}, [3]int{9216, 4, 1}, [3]int{7168, 5, 1}}
+	for _, candidate := range recommended {
+		if memoryKiB >= candidate[0] && iterations >= candidate[1] && parallelism >= candidate[2] { return true }
+	}
+	return false
+}
+{{end}}func envOr(getenv envLookup, name, fallback string) string {
 	if value := getenv(name); value != "" {
 		return value
 	}

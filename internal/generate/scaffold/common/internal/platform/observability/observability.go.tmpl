@@ -1,0 +1,94 @@
+package observability
+
+import (
+	"database/sql"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+)
+
+type Metrics struct {
+	Registry       *prometheus.Registry
+	HTTPRequests   *prometheus.CounterVec
+	HTTPDuration   *prometheus.HistogramVec
+	HTTPInFlight   prometheus.Gauge
+}
+
+func New(db *sql.DB) *Metrics {
+	registry := prometheus.NewRegistry()
+	metrics := &Metrics{
+		Registry: registry,
+		HTTPRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "http_server_requests_total",
+			Help: "Total number of HTTP requests handled by the server.",
+		}, []string{"method", "route", "status_class"}),
+		HTTPDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "http_server_request_duration_seconds",
+			Help:    "HTTP request duration in seconds.",
+			Buckets: prometheus.DefBuckets,
+		}, []string{"method", "route"}),
+		HTTPInFlight: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "http_server_in_flight_requests",
+			Help: "Number of HTTP requests currently being handled.",
+		}),
+	}
+	registry.MustRegister(metrics.HTTPRequests, metrics.HTTPDuration, metrics.HTTPInFlight)
+	registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "app_build_info",
+		Help: "Build information for the generated application.",
+	}, func() float64 { return 1 }))
+	if db != nil {
+		registry.MustRegister(
+			prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "db_open_connections", Help: "Number of open database connections."}, func() float64 {
+				return float64(db.Stats().OpenConnections)
+			}),
+			prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "db_in_use_connections", Help: "Number of database connections currently in use."}, func() float64 {
+				return float64(db.Stats().InUse)
+			}),
+			prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "db_idle_connections", Help: "Number of idle database connections."}, func() float64 {
+				return float64(db.Stats().Idle)
+			}),
+			prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "db_wait_count", Help: "Total number of waits for a database connection."}, func() float64 {
+				return float64(db.Stats().WaitCount)
+			}),
+			prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "db_wait_duration_seconds", Help: "Total time waited for a database connection in seconds."}, func() float64 {
+				return db.Stats().WaitDuration.Seconds()
+			}),
+		)
+	}
+	registry.MustRegister(
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+	)
+	return metrics
+}
+
+func (m *Metrics) BeginRequest() {
+	m.HTTPInFlight.Inc()
+}
+
+func (m *Metrics) ObserveHTTP(method, route string, status int, duration time.Duration) {
+	m.HTTPInFlight.Dec()
+	method = strings.TrimSpace(method)
+	if method == "" {
+		method = "UNKNOWN"
+	}
+	route = strings.TrimSpace(route)
+	if route == "" {
+		route = "unknown"
+	}
+	if status < 100 || status > 599 {
+		status = http.StatusInternalServerError
+	}
+	m.HTTPRequests.WithLabelValues(method, route, strconv.Itoa(status/100)+"xx").Inc()
+	m.HTTPDuration.WithLabelValues(method, route).Observe(duration.Seconds())
+}
+
+func (m *Metrics) Handler() http.Handler {
+	return promhttp.HandlerFor(m.Registry, promhttp.HandlerOpts{})
+}

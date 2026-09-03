@@ -1,0 +1,78 @@
+<script setup lang="ts">
+import { ref } from "vue"
+import { useQueryClient } from "@tanstack/vue-query"
+import { RouterLink, useRouter } from "vue-router"
+import { resources } from "@/generated/registry_gen"
+import { logout, useAuth } from "@/lib/auth"
+import { useTheme } from "@/lib/theme"
+
+const router = useRouter()
+const queryClient = useQueryClient()
+const { identity } = useAuth()
+const { theme, cycle } = useTheme()
+const menuOpen = ref(false)
+const signingOut = ref(false)
+
+async function signOut() {
+  signingOut.value = true
+  try {
+    await logout()
+    queryClient.clear()
+    await router.replace({ name: "login" })
+  } finally {
+    signingOut.value = false
+  }
+}
+</script>
+
+<template>
+  <div class="app-frame">
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="mobile-header">
+      <RouterLink class="brand" :to="{ name: 'dashboard' }" @click="menuOpen = false">
+        <span class="brand-mark" aria-hidden="true">G</span>
+        <span>Operations</span>
+      </RouterLink>
+      <button class="icon-button" type="button" :aria-expanded="menuOpen" aria-controls="primary-navigation" aria-label="Toggle navigation" @click="menuOpen = !menuOpen">
+        <span aria-hidden="true">☰</span>
+      </button>
+    </header>
+
+    <button v-if="menuOpen" class="menu-backdrop" type="button" aria-label="Close navigation" @click="menuOpen = false" />
+
+    <aside id="primary-navigation" class="sidebar" :class="{ open: menuOpen }">
+      <RouterLink class="brand desktop-brand" :to="{ name: 'dashboard' }" @click="menuOpen = false">
+        <span class="brand-mark" aria-hidden="true">G</span>
+        <span>Operations</span>
+      </RouterLink>
+      <nav aria-label="Primary navigation">
+        <p class="nav-label">Workspace</p>
+        <RouterLink class="nav-link" :to="{ name: 'dashboard' }" @click="menuOpen = false">Overview</RouterLink>
+        <p class="nav-label">Resources</p>
+        <RouterLink v-for="resource in resources" :key="resource.key" class="nav-link" :to="{ name: 'resource', params: { resource: resource.key } }" @click="menuOpen = false" v-text="resource.name" />
+        <p v-if="resources.length === 0" class="nav-empty">Add a resource YAML to populate the console.</p>
+        <template v-if="identity?.role === 'admin'">
+          <p class="nav-label">Administration</p>
+          <RouterLink class="nav-link" :to="{ name: 'users' }" @click="menuOpen = false">Users</RouterLink>
+          <RouterLink class="nav-link" :to="{ name: 'audit' }" @click="menuOpen = false">Audit logs</RouterLink>
+        </template>
+      </nav>
+      <div class="sidebar-footer">
+        <RouterLink class="identity" :to="{ name: 'account' }" @click="menuOpen = false">
+          <span class="avatar" aria-hidden="true" v-text="identity?.email.slice(0, 1).toUpperCase()" />
+          <span class="identity-copy"><strong v-text="identity?.email" /><small v-text="identity?.role" /></span>
+        </RouterLink>
+        <div class="sidebar-actions">
+          <button class="text-button" type="button" :aria-label="`Theme preference: ${theme}. Change theme`" @click="cycle">
+            <span aria-hidden="true" v-text="theme === 'system' ? '◒' : theme === 'light' ? '◐' : '◑'" /> <span v-text="theme === 'system' ? 'System' : theme === 'light' ? 'Light' : 'Dark'" />
+          </button>
+          <button class="text-button" type="button" :disabled="signingOut" @click="signOut">Sign out</button>
+        </div>
+      </div>
+    </aside>
+
+    <main id="main-content" class="main-content" tabindex="-1">
+      <slot />
+    </main>
+  </div>
+</template>

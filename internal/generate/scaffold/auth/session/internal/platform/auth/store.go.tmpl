@@ -1,0 +1,236 @@
+package auth
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+var (
+	ErrSessionNotFound = errors.New("session not found")
+	ErrUserNotFound    = errors.New("user not found")
+)
+
+type Store struct{ db *gorm.DB }
+
+func NewStore(db *gorm.DB) *Store { return &Store{db: db} }
+
+func (s *Store) FindUserByEmail(ctx context.Context, email string) (User, error) {
+	var user User
+	err := s.db.WithContext(ctx).Where("email = ?", normalizeEmail(email)).Take(&user).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return User{}, ErrUserNotFound
+	}
+	return user, err
+}
+
+func (s *Store) FindUserByID(ctx context.Context, id int64) (User, error) {
+	var user User
+	err := s.db.WithContext(ctx).Take(&user, id).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return User{}, ErrUserNotFound
+	}
+	return user, err
+}
+
+func (s *Store) CreateUser(ctx context.Context, email, passwordHash, role string) (User, error) {
+	user := User{Email: normalizeEmail(email), PasswordHash: passwordHash, Role: role}
+	if err := s.db.WithContext(ctx).Create(&user).Error; err != nil {
+		return User{}, err
+	}
+	return user, nil
+}
+
+func (s *Store) UpdatePasswordHash(ctx context.Context, userID int64, passwordHash string) error {
+	return s.db.WithContext(ctx).Model(&User{}).Where("id = ?", userID).Update("password_hash", passwordHash).Error
+}
+
+func (s *Store) Bootstrap(ctx context.Context, email, password string, passwords *PasswordManager) (created, ignored bool, err error) {
+	var count int64
+	if err := s.db.WithContext(ctx).Model(&User{}).Count(&count).Error; err != nil {
+		return false, false, fmt.Errorf("count auth users: %w", err)
+	}
+	if count > 0 {
+		return false, strings.TrimSpace(email) != "" || password != "", nil
+	}
+	if strings.TrimSpace(email) == "" || password == "" {
+		return false, false, errors.New("auth_users is empty; AUTH_BOOTSTRAP_EMAIL and AUTH_BOOTSTRAP_PASSWORD are required")
+	}
+	permit, ok := passwords.TryAcquire()
+	if !ok {
+		return false, false, ErrHashCapacity
+	}
+	defer permit.Release()
+	hash, err := permit.Hash(password)
+	if err != nil {
+		return false, false, err
+	}
+	if _, err := s.CreateUser(ctx, email, hash, "admin"); err != nil {
+		return false, false, fmt.Errorf("create bootstrap admin: %w", err)
+	}
+	return true, false, nil
+}
+
+func (s *Store) CreateSession(ctx context.Context, userID int64, previousToken, userAgent, ip string, ttl time.Duration, now time.Time) (string, error) {
+	return s.createSessionInDB(ctx, s.db, userID, previousToken, userAgent, ip, ttl, now)
+}
+
+func (s *Store) createSessionInDB(ctx context.Context, db *gorm.DB, userID int64, previousToken, userAgent, ip string, ttl time.Duration, now time.Time) (string, error) {
+	token := NewSessionToken()
+	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var user User
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND disabled_at IS NULL", userID).Take(&user).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) { return ErrUserNotFound }
+			return err
+		}
+		if previousToken != "" {
+			if err := tx.Where("token_digest = ?", tokenDigest(previousToken)).Delete(&Session{}).Error; err != nil {
+				return err
+			}
+		}
+		session := Session{
+			UserID: userID, TokenDigest: tokenDigest(token), ExpiresAt: now.Add(ttl),
+			LastSeenAt: now, UserAgent: truncate(userAgent, 512), IP: truncate(ip, 64),
+		}
+		return tx.Create(&session).Error
+	})
+	if err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+type sessionRow struct {
+	SessionID  int64
+	UserID     int64
+	Email      string
+	Role       string
+	ExpiresAt  time.Time
+	LastSeenAt time.Time
+}
+
+func (s *Store) Authenticate(ctx context.Context, token string, now time.Time, idleTimeout time.Duration) (Identity, error) {
+	if token == "" {
+		return Identity{}, ErrSessionNotFound
+	}
+	var row sessionRow
+	err := s.db.WithContext(ctx).Table("auth_sessions AS sessions").
+		Select("sessions.id AS session_id, sessions.user_id, users.email, users.role, sessions.expires_at, sessions.last_seen_at").
+		Joins("JOIN auth_users AS users ON users.id = sessions.user_id").
+		Where("sessions.token_digest = ? AND sessions.expires_at > ? AND users.disabled_at IS NULL", tokenDigest(token), now).
+		Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return Identity{}, ErrSessionNotFound
+	}
+	if err != nil {
+		return Identity{}, err
+	}
+	if !row.LastSeenAt.After(now.Add(-idleTimeout)) {
+		_ = s.db.WithContext(ctx).Where("id = ?", row.SessionID).Delete(&Session{}).Error
+		return Identity{}, ErrSessionNotFound
+	}
+	if row.LastSeenAt.Before(now.Add(-time.Minute)) {
+		cutoff := now.Add(-time.Minute)
+		if err := s.db.WithContext(ctx).Model(&Session{}).
+			Where("id = ? AND last_seen_at < ?", row.SessionID, cutoff).
+			Update("last_seen_at", now).Error; err != nil {
+			return Identity{}, err
+		}
+	}
+	return Identity{SessionID: row.SessionID, UserID: row.UserID, Email: row.Email, Role: row.Role}, nil
+}
+
+func (s *Store) ActorForToken(ctx context.Context, token string) (Identity, error) {
+	if token == "" {
+		return Identity{}, ErrSessionNotFound
+	}
+	var row sessionRow
+	err := s.db.WithContext(ctx).Table("auth_sessions AS sessions").
+		Select("sessions.id AS session_id, sessions.user_id, users.email, users.role").
+		Joins("JOIN auth_users AS users ON users.id = sessions.user_id").
+		Where("sessions.token_digest = ?", tokenDigest(token)).Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return Identity{}, ErrSessionNotFound
+	}
+	if err != nil {
+		return Identity{}, err
+	}
+	return Identity{SessionID: row.SessionID, UserID: row.UserID, Email: row.Email, Role: row.Role}, nil
+}
+
+func (s *Store) DeleteSession(ctx context.Context, token string) error {
+	if token == "" {
+		return nil
+	}
+	return s.db.WithContext(ctx).Where("token_digest = ?", tokenDigest(token)).Delete(&Session{}).Error
+}
+
+func (s *Store) DeleteUserSessions(ctx context.Context, userID int64) error {
+	return s.db.WithContext(ctx).Where("user_id = ?", userID).Delete(&Session{}).Error
+}
+
+func (s *Store) ChangePasswordAndRotate(ctx context.Context, userID int64, passwordHash, userAgent, ip string, ttl time.Duration, now time.Time) (string, error) {
+	token := NewSessionToken()
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&User{}).Where("id = ? AND disabled_at IS NULL", userID).Update("password_hash", passwordHash)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrUserNotFound
+		}
+		if err := tx.Where("user_id = ?", userID).Delete(&Session{}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&Session{
+			UserID: userID, TokenDigest: tokenDigest(token), ExpiresAt: now.Add(ttl), LastSeenAt: now,
+			UserAgent: truncate(userAgent, 512), IP: truncate(ip, 64),
+		}).Error
+	})
+	if err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+func (s *Store) DisableUser(ctx context.Context, userID int64, now time.Time) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&User{}).Where("id = ?", userID).Update("disabled_at", now).Error; err != nil {
+			return err
+		}
+		return tx.Where("user_id = ?", userID).Delete(&Session{}).Error
+	})
+}
+
+func (s *Store) SweepExpired(ctx context.Context, interval time.Duration, onError func(error)) {
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			if err := s.db.WithContext(ctx).Where("expires_at <= ?", now.UTC()).Delete(&Session{}).Error; err != nil && ctx.Err() == nil && onError != nil {
+				onError(err)
+			}
+		}
+	}
+}
+
+func normalizeEmail(email string) string { return strings.ToLower(strings.TrimSpace(email)) }
+
+func truncate(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit]
+}

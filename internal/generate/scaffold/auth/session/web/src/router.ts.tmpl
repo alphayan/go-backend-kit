@@ -1,0 +1,35 @@
+import { createRouter, createWebHistory } from "vue-router"
+import { loadSession } from "./lib/auth"
+import AccountView from "./views/AccountView.vue"
+import DashboardView from "./views/DashboardView.vue"
+import LoginView from "./views/LoginView.vue"
+import NotFoundView from "./views/NotFoundView.vue"
+import ResourceView from "./views/ResourceView.vue"
+import UsersView from "./views/UsersView.vue"
+import AuditView from "./views/AuditView.vue"
+
+export const router = createRouter({
+  history: createWebHistory("/admin/"),
+  routes: [
+    { path: "/login", name: "login", component: LoginView, meta: { public: true } },
+    { path: "/", name: "dashboard", component: DashboardView },
+    { path: "/account", name: "account", component: AccountView },
+    { path: "/users", name: "users", component: UsersView, meta: { admin: true } },
+    { path: "/audit", name: "audit", component: AuditView, meta: { admin: true } },
+    { path: "/resources/:resource", name: "resource", component: ResourceView },
+    { path: "/:pathMatch(.*)*", name: "not-found", component: NotFoundView },
+  ],
+  scrollBehavior: () => ({ top: 0 }),
+})
+
+router.beforeEach(async (to) => {
+  const session = await loadSession(to.meta.admin === true)
+  if (to.meta.public) {
+    return to.name === "login" && session !== null ? { name: "dashboard" } : true
+  }
+  if (session === null) {
+    return { name: "login", query: { redirect: to.fullPath } }
+  }
+  if (to.meta.admin && session.role !== "admin") return { name: "dashboard" }
+  return true
+})

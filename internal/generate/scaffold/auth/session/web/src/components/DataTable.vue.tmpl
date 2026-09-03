@@ -1,0 +1,81 @@
+<script setup lang="ts" generic="T extends Record<string, unknown> & { id: number }">
+import type { ColumnDefinition } from "@/lib/resource"
+import { formatCell } from "@/lib/resource"
+
+const props = defineProps<{
+  columns: ColumnDefinition[]
+  rows: T[]
+  loading: boolean
+  page: number
+  totalPages: number
+  total: number
+  sort: string
+  canWrite: boolean
+}>()
+const emit = defineEmits<{
+  edit: [record: T]
+  delete: [record: T]
+  page: [page: number]
+  sort: [sort: string]
+}>()
+
+function nextSort(column: ColumnDefinition) {
+  if (!column.sortable) return
+  const descending = `-${column.key}`
+  emit("sort", props.sort === column.key ? descending : props.sort === descending ? "" : column.key)
+}
+
+function sortLabel(column: ColumnDefinition): "none" | "ascending" | "descending" {
+  if (props.sort === column.key) return "ascending"
+  if (props.sort === `-${column.key}`) return "descending"
+  return "none"
+}
+</script>
+
+<template>
+  <div class="table-card">
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th v-for="column in columns" :key="column.key" :aria-sort="column.sortable ? sortLabel(column) : undefined">
+              <button v-if="column.sortable" class="sort-button" type="button" @click="nextSort(column)">
+                <span v-text="column.label" />
+                <span aria-hidden="true" v-text="sort === column.key ? '↑' : sort === `-${column.key}` ? '↓' : '↕'" />
+              </button>
+              <span v-else v-text="column.label" />
+            </th>
+            <th v-if="canWrite" class="actions-column"><span class="sr-only">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-if="loading">
+            <td :colspan="columns.length + (canWrite ? 1 : 0)"><div class="table-message" role="status">Loading records…</div></td>
+          </tr>
+          <tr v-else-if="rows.length === 0">
+            <td :colspan="columns.length + (canWrite ? 1 : 0)"><div class="table-message">No records match this view.</div></td>
+          </tr>
+          <tr v-for="record in rows" v-else :key="record.id">
+            <td v-for="column in columns" :key="column.key" :data-label="column.label">
+              <span :class="{ 'boolean-pill': column.kind === 'bool' }" v-text="formatCell(record[column.key], column.kind)" />
+            </td>
+            <td v-if="canWrite" class="row-actions" data-label="Actions">
+              <slot name="actions" :record="record">
+              <button class="link-button" type="button" @click="emit('edit', record)">Edit</button>
+              <button class="link-button danger-text" type="button" @click="emit('delete', record)">Delete</button>
+              </slot>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <footer class="pagination" aria-label="Pagination">
+      <p><strong v-text="total.toLocaleString()" /> records</p>
+      <div>
+        <button class="button secondary compact" type="button" :disabled="page <= 1 || loading" @click="emit('page', page - 1)">Previous</button>
+        <span class="page-count" v-text="`Page ${page} of ${Math.max(totalPages, 1)}`" />
+        <button class="button secondary compact" type="button" :disabled="page >= totalPages || loading" @click="emit('page', page + 1)">Next</button>
+      </div>
+    </footer>
+  </div>
+</template>

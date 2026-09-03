@@ -103,6 +103,32 @@ fields:
 	}
 }
 
+func TestModelAddsCheckConstraintForEnum(t *testing.T) {
+	resource, err := spec.Parse([]byte(`schema_version: 1
+name: Task
+table: tasks
+route: /tasks
+fields:
+  - name: state
+    type: string
+    enum: [new, "owner's review"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rendered, err := executeGoTemplate("model_gen.go", modelTemplate, resourceData{
+		Module:   "example.com/project",
+		Resource: resource,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "check:state IN ('new', 'owner''s review')"; !strings.Contains(string(rendered), want) {
+		t.Fatalf("generated model does not contain %q:\n%s", want, rendered)
+	}
+}
+
 func TestStoreUsesConsistentReadSnapshotAndAtomicUpdate(t *testing.T) {
 	resource, err := spec.Parse([]byte(`schema_version: 1
 name: Task
@@ -111,6 +137,7 @@ route: /tasks
 fields:
   - name: title
     type: string
+    searchable: true
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -130,6 +157,9 @@ fields:
 		`&sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}`,
 		`item, err := (store{db: tx}).get(ctx, id)`,
 		`updated = item`,
+		`pattern := searchPattern(filters.query)`,
+		`LIKE ? ESCAPE '\\'`,
+		`strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_")`,
 	} {
 		if !strings.Contains(source, want) {
 			t.Errorf("generated postgres store does not contain %q:\n%s", want, source)
@@ -209,5 +239,104 @@ fields:
 	noneSpec := string(sqliteFiles["openapi/openapi_gen.json"])
 	if strings.Contains(noneSpec, "bearerAuth") || strings.Contains(noneSpec, `"401"`) {
 		t.Fatalf("auth=none OpenAPI still declares bearer security:\n%s", noneSpec)
+	}
+}
+
+func TestRenderSessionPermissionsSchemaAndOpenAPI(t *testing.T) {
+	resource, err := spec.Parse([]byte(`schema_version: 1
+name: Inventory
+table: inventory_items
+route: /odd-items
+fields:
+  - name: label
+    type: string
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := DefaultProjectOptions()
+	opts.Auth = AuthSession
+	files, err := renderGenerated("example.com/project", []spec.Resource{resource}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	permissions := string(files["internal/generated/permissions_gen.go"])
+	for _, want := range []string{
+		`"inventory.read": {}`,
+		`"inventory.create": {}`,
+		`"GET /api/v1/odd-items"`,
+		`"PATCH /api/v1/odd-items/:id"`,
+	} {
+		if !strings.Contains(permissions, want) {
+			t.Errorf("permissions output missing %q:\n%s", want, permissions)
+		}
+	}
+	schema := string(files["tools/gormschema/main_gen.go"])
+	for _, want := range []string{
+		`platformauth "example.com/project/internal/platform/auth"`,
+		`&platformauth.User{}`,
+		`&platformauth.Session{}`,
+		`&platformauth.AuditLog{}`,
+	} {
+		if !strings.Contains(schema, want) {
+			t.Errorf("gorm schema output missing %q:\n%s", want, schema)
+		}
+	}
+	document := string(files["openapi/openapi_gen.json"])
+	for _, want := range []string{`"/auth/login"`, `"/auth/password"`, `"/auth/users"`, `"/auth/users/{id}/sessions/{session_id}"`, `"/auth/audit-logs"`, `"AuthUpdateUser"`, `"sessionCookie"`, `"in": "cookie"`, `"403"`, `"429"`} {
+		if !strings.Contains(document, want) {
+			t.Errorf("session OpenAPI missing %q:\n%s", want, document)
+		}
+	}
+
+	noneFiles, err := renderGenerated("example.com/project", []spec.Resource{resource}, DefaultProjectOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := noneFiles["internal/generated/permissions_gen.go"]; exists {
+		t.Fatal("auth=none rendered session permissions")
+	}
+	if strings.Contains(string(noneFiles["tools/gormschema/main_gen.go"]), "platformauth") || strings.Contains(string(noneFiles["openapi/openapi_gen.json"]), "/auth/login") {
+		t.Fatal("auth=none output contains session artifacts")
+	}
+}
+
+func TestSessionOpenAPIReservesBuiltInComponentNames(t *testing.T) {
+	resource, err := spec.Parse([]byte(`schema_version: 1
+name: Login
+table: logins
+route: /logins
+fields: []
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := DefaultProjectOptions()
+	opts.Auth = AuthSession
+	_, err = buildOpenAPI([]spec.Resource{resource}, opts)
+	if err == nil || !strings.Contains(err.Error(), `schema "Login"`) || !strings.Contains(err.Error(), "session login input") {
+		t.Fatalf("buildOpenAPI() error = %v", err)
+	}
+}
+
+func TestSessionGormSchemaAliasesPlatformAuthBesideAuthResource(t *testing.T) {
+	resource, err := spec.Parse([]byte(`schema_version: 1
+name: Auth
+table: authentications
+route: /auth-records
+fields: []
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := DefaultProjectOptions()
+	opts.Auth = AuthSession
+	files, err := renderGenerated("example.com/project", []spec.Resource{resource}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := string(files["tools/gormschema/main_gen.go"])
+	if !strings.Contains(schema, `platformauth "example.com/project/internal/platform/auth"`) || !strings.Contains(schema, `"example.com/project/internal/resources/auth"`) {
+		t.Fatalf("schema imports =\n%s", schema)
 	}
 }

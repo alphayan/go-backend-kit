@@ -7,13 +7,16 @@
 ## 环境要求
 
 - Go {{.Pins.GoVersion}} 或更高版本；推荐 toolchain {{.Pins.Toolchain}}
-{{if or .Options.IsPostgres .Options.HasRedis .Options.HasNATS}}- Docker，用于已选择的开发服务和 Atlas 迁移
+{{if .Options.HasSession}}- Node.js {{.Pins.Node}} LTS 和 pnpm {{.Pins.PNPM}}，用于前端开发与构建；生产运行时不依赖它们
+{{end}}
+{{if .Options.IsProduction}}- Docker，用于本地应用、Prometheus、Grafana、已选择的服务和 Atlas 迁移
+{{else if or .Options.IsPostgres .Options.HasRedis .Options.HasNATS}}- Docker，用于已选择的开发服务和 Atlas 迁移
 {{else}}- 运行应用不需要 Docker。生成 SQL 迁移时仍会使用固定的 Atlas Community 镜像。
 {{end}}
 本项目创建时的选择：
 
 ```text
---http {{.Options.HTTP}} --database {{.Options.Database}} --cache {{.Options.Cache}} --messaging {{.Options.Messaging}} --logging {{.Options.Logging}} --auth {{.Options.Auth}}
+--http {{.Options.HTTP}} --database {{.Options.Database}} --cache {{.Options.Cache}} --messaging {{.Options.Messaging}} --logging {{.Options.Logging}} --auth {{.Options.Auth}} --profile {{.Options.Profile}}
 ```
 
 选择记录在 `.gobackend-project.json` 中，不能就地修改。若要更换 provider，请创建新项目。
@@ -25,9 +28,15 @@ go tool gobackend add path/to/resource.yaml
 go tool gobackend check
 ```
 
-`resources/` 中的 YAML 是唯一事实来源。纳入版本管理的 `.gobackend-generated.json` 清单记录生成器实际拥有的每条路径及其 SHA-256 摘要；普通手写 `.go` 文件永不覆盖。陈旧生成文件只有在当前内容仍与清单一致时才会删除；如果被人工修改，生成会安全报错，不会删除该文件。
+`resources/` 中的 YAML 是唯一事实来源。纳入版本管理的 `.gobackend-generated.json` 清单记录生成器实际拥有的每条路径及其 SHA-256 摘要；资源生成不会覆盖普通手写 `.go` 文件。陈旧生成文件只有在当前内容仍与清单一致时才会删除；如果被人工修改，生成会安全报错，不会删除该文件。
 
 `go tool gobackend generate` 会保留固定版本的官方 `go tool gorm gen` 工作流，重新生成 store 筛选和排序实际使用的字段辅助。`gormgen/query_gen.go` 只由官方 GORM CLI 生成，gobackend 不重写该输出。
+
+## 脚手架升级
+
+请提交 `.gobackend-scaffold.json`，它独立于资源生成记录原始脚手架摘要。在本目录用新版 `gobackend upgrade` 预览，审查后再运行 `gobackend upgrade --apply`。冲突会阻止整批应用；对照报告目录中的 `candidate/` 手工合并，再用 `--keep` 明确确认各个已解决的脚手架路径。没有基线的旧项目需要 `--baseline` 指向经核验的原始项目（相同 module/provider/资源定义），不能拿当前已改动项目冒充原始基线。
+
+私有且 gitignore 的 `.gobackend/upgrade-*` 保存 `plan.json`、`candidate/` 和 `before/` 原文件备份。应用期间不要编辑或部署。写入失败会尽可能回滚，崩溃仍可能留下部分升级，重跑/恢复前需核对计划和备份。不会修改真实 `.env`、迁移或资源定义，不会切换 provider、执行数据库迁移或部署。完成后运行模块整理、生成/check、race/vet/漏洞检查{{if .Options.HasSession}}、冻结 pnpm 安装和前端/浏览器测试{{end}}，并显式审查/应用需要的数据库迁移。保留恢复目录直到验收完成。
 
 ## 数据库与迁移
 {{if .Options.IsSQLite}}
@@ -39,6 +48,8 @@ SQLite 是真实运行时，不只是测试替身。需要 PostgreSQL 并发、�
 make migration name=create_products
 make migrate-apply
 ```
+{{else if .Options.IsProduction}}
+首次启动、凭据分离、迁移及备份恢复见 [PostgreSQL 生产操作](docs/postgres-operations.md)。必须先配置 `.env.postgres`，再启动数据库并用 `ATLAS_DATABASE_URL` 显式执行迁移。`.env` 只放 API 的运行角色凭据。
 {{else}}
 ```bash
 docker compose up -d postgres
@@ -82,6 +93,57 @@ openssl rand -base64 32
 
 将值写入 gitignore 的本地 `.env` 中的 `AUTH_JWT_SECRET_B64`，并设置 `AUTH_JWT_ISSUER` 与 `AUTH_JWT_AUDIENCE`。可选 `AUTH_JWT_LEEWAY` 默认 30s，上限 2m。
 {{end}}
+{{if .Options.HasSession}}
+## 数据库 Session 认证
+
+本项目使用第一方账号密码和可撤销的数据库 Session。`POST /auth/login`、`POST /auth/logout` 公开（logout 幂等）；`GET /auth/me`、`POST /auth/password` 和全部 `/api/v1` 路由要求 Session。Session 的 401 响应刻意不发送 `WWW-Authenticate`。
+
+迁移的事实源是 GORM 模型：`auth_users`、`auth_sessions`、`auth_audit_logs`{{if .Options.IsPostgres}}，以及共享登录限流表 `auth_rate_limits`{{end}}。生成器不附带静态 SQL；首次启动前必须执行 `make migration name=session_auth`，审查并提交 SQL，再执行 `make migrate-apply`。运行时绝不调用 `AutoMigrate`。固定角色只有 `admin`（全部生成权限）和 `viewer`（只读权限）；可调整用户的角色归属，不能在线编辑角色定义或权限集合。
+
+SQLite 单元测试通过仅用于测试的 `AutoMigrate` 创建相同认证模型，不依赖 Docker。AutoMigrate 与 Atlas 独立生成 DDL：单元测试通过不代表审查后的迁移能够应用、或与模型 schema 一致。必须保留一次性数据库上的 Atlas apply/schema-diff 独立验收；PostgreSQL 集成测试需要已经显式迁移的一次性数据库。
+
+当 `auth_users` 为空时，若没有同时设置 `AUTH_BOOTSTRAP_EMAIL` 与 `AUTH_BOOTSTRAP_PASSWORD`，启动会拒绝。请使用唯一的引导密码；首次成功启动后删除这两个变量，并立即通过 `/auth/password` 换密。已有任意用户时，后续启动会忽略仍存在的引导变量并告警。
+
+密码存储编码刻意不带前导 `$`：`argon2id$v=19$m=<KiB>,t=<passes>,p=<lanes>$<salt>$<digest>`，以及旧格式 `pbkdf2-sha256$i=<iterations>$<salt>$<digest>`。盐为 16 字节、摘要为 32 字节，使用不带 padding 的标准 Base64。Argon2id 格式接近 PHC，但不是标准 PHC，不能直接交给现成 PHC 解码器。不得静默补上前导 `$` 或更改解析规则；格式变更必须通过明确的兼容/迁移方案保留存量哈希的可用性。
+
+密码默认使用 Argon2id `m=19456,t=2,p=1`；已有 PBKDF2-SHA256 哈希可作为文档化的 FIPS 迁移路径读取。应在部署主机上把 Argon2id 调到约 100–300ms。活跃 Argon2 工作缓冲区约为 `存量哈希内存参数 × AUTH_PASSWORD_HASH_CONCURRENCY`：默认四个槽位处理默认哈希时为 76 MiB；若存量哈希使用允许的 64 MiB 参数上限，则为 256 MiB。这不是进程 RSS 上限，尚未回收的分配、其他业务和运行时开销都需要额外余量。每个进程的 KDF 并发已封顶，满载时不排队而立即返回 429。登录/注销扣减 IP 额度；登录还会在 KDF 前预占邮箱次数（包括未知账号和哈希满载的请求），邮箱额度为 `AUTH_LOGIN_RATE_LIMIT` 的三倍，凭据验证成功后清零。预占可防止并发失败请求超额。IP 键来自 Echo `RealIP`；只有可信反向代理才能配置 `IPExtractor`，否则转发头可伪造；代理后未配置时所有客户端会挤在代理的同一桶中。
+
+部署主机上的可复现命令：`GOGC=100 GOMEMLIMIT=2GiB go test ./internal/platform/auth -run='^$' -bench='^BenchmarkPassword$' -benchmem -benchtime=1s -count=10 -cpu=1,4`。基准包含 Argon2id 哈希/验证、600,000 次迭代的旧 PBKDF2-SHA256 验证，各有串行与 `RunParallel` 两种负载；仅使用虚构口令，不访问数据库。应连同原始输出记录硬件、工具链、参数和 GC 设置，再用 benchstat 或等价统计比较重复样本。并行 `ns/op` 是总墙钟除以完成次数，不是单次登录延迟；`B/op` 是分配量，不是峰值存活内存或 RSS。`-race` 应另跑。这些数字不含 HTTP、数据库、KDF 准入/拒绝或登录后的重哈希，不能推导算法强弱或生产 SLO。Go 内存限制只是 GC 软目标，不是硬安全上限；按目标机器容量选择 CPU/并发和内存预算。
+
+{{if .Options.IsPostgres}}PostgreSQL 使用数据库时间和哈希前即提交的短事务，在多个进程及重启之间共享额度。所有实例必须使用相同数据库/schema 和限流次数/窗口配置。IP、邮箱各最多 10,000 个摘要；满载时拒绝新键，不驱逐仍有效的额度。过期行在下次请求时清理。数据库异常/超时返回 500，绝不降级为本地放行；SHA-256 摘要不等于匿名化。每次数据库操作最多等待两秒；短表锁刻意串行化低流量认证请求，上线扩容前仍须压测。旧项目必须先显式迁移新表，再运行新处理器；旧二进制仍是本地限流，必须退出流量后才能保证整个集群的共享额度。
+
+一次性数据库验证（会删除/填满 `auth_rate_limits`，禁止真实数据）：`TEST_RATE_DATABASE_URL="..." TEST_RATE_DISPOSABLE=1 go test -race ./internal/platform/auth -run '^TestPostgresSharedLimiter$' -count=1`。会启动两个独立进程，检查 IP/邮箱共享额度、过期、容量、取消和数据库故障拒绝；需与应用测试分开运行。{{else}}SQLite 使用有容量上限的进程内 LRU 窗口，只适合单进程；多实例应选择 PostgreSQL，不能共享 SQLite 文件来获得共享额度。{{end}}
+
+`AUTH_SESSION_SECURE=true` 时 Cookie 名为 `__Host-session`；个人本地开发为 false 时使用 `session`。生产档拒绝不安全 Cookie。生产必须启用 TLS 和 HSTS，因为标准库 Origin 检查以主机为边界，不把 scheme 单独作为信任边界。
+
+生成的管理端位于 `/admin/`。资源注册表、Zod Schema、表单描述和表格列由 `resources/*.yaml` 重建，并记录在 `.gobackend-generated.json` 中；共享组件和页面是可以自行编辑的脚手架文件，后续资源生成不会覆盖。管理员可以新增、修改、删除记录，viewer 展示只读界面，服务器权限仍是最终边界。它还包含登录/注销、密码修改、搜索、声明过的筛选与排序、分页、响应式布局、可访问对话框和亮色/暗色/跟随系统主题。
+
+使用 `make frontend-install`、`make frontend-typecheck`、`make frontend-test` 和 `make frontend-build`。`make frontend-dev` 启动 Vite，并把 `/auth` 与 `/api` 代理到 Go 服务，从而保持 Session 的同源边界。生产构建先编译 `web/dist`，再由 Go 二进制内嵌；Node.js 和 pnpm 不是运行依赖。
+
+`net/http.CrossOriginProtection` 全局生效。安全方法、`Sec-Fetch-Site: same-origin`/`none`、同时没有 `Sec-Fetch-Site` 与 `Origin` 的请求，以及 Origin 主机与 Host 相同的请求会放行；后两项是明确记录的 fail-open 边界。CORS 允许读取响应并不豁免跨站写。生成的 Vite 服务把浏览器 API 流量代理到 Go 服务，生产二进制不会信任 Vite origin；任何 GET 都不得改状态。
+
+资源变更提交后才尽力写审计；审计失败只记录错误，不改变已经提交的业务响应，因此进程在该窗口崩溃可能丢一条审计。审计绝不保存请求体、密码、token 或 Cookie 值。`AUTH_AUDIT_RETENTION_DAYS=0` 默认保留所有事件；明确设置正整数后，每小时分批删除超过天数的记录，每批 1,000 条、每小时最多 100,000 条。开启前应先归档需要保留的证据。
+
+管理员可通过 `/admin/users` 创建用户、调整固定角色归属、禁用/启用账号、查看和撤销会话。禁止修改自身角色/状态；调整其他用户的访问权限会撤销其全部会话。写操作在数据库事务内重新核验操作者的管理员权限，防止并发变更使用过期角色。没有用户删除或密码重置接口。
+
+仅管理员可用的 API：`GET/POST /auth/users`、`PATCH /auth/users/:id`、`GET/DELETE /auth/users/:id/sessions`、`DELETE /auth/users/:id/sessions/:session_id`、`GET /auth/audit-logs`。列表支持 `page`、`page_size`（1–100）；用户支持精确 `email` 筛选，审计支持精确 `actor_id`、`action`、`resource`、`outcome` 和 RFC3339 时间 `from`（含）/`to`（不含）。审计按最新记录优先排列，页面为 `/admin/audit`。响应不含密码哈希或会话摘要，并设置 `Cache-Control: no-store`。
+
+`pnpm frontend:e2e` 使用 Playwright 驱动真实 Chromium。测试会创建账号和修改密码，只能针对已经显式迁移的全新一次性数据库，禁止使用真实数据。先构建前端，并执行 `PLAYWRIGHT_SKIP_BROWSER_GC=1 pnpm exec playwright install chromium`，再带 `E2E_DISPOSABLE_DATABASE=1` 运行。测试自行启动回环地址 4187 端口的服务（可用 `E2E_PORT` 覆盖），拒绝复用已有服务，退出时关闭。这套 HTTP 测试适用于个人档；生成器仓库另有 `scripts/frontend-e2e.sh production`，使用临时 SQLite 和测试 TLS 代理核验 Secure Cookie/跨站边界，但不会为本项目安装生产代理或证书。真实域名、HSTS、可信代理和 PostgreSQL 部署仍须单独验收。失败截图和 trace 保存在 gitignore 的 `test-results/`，可能包含测试凭据。
+
+使用 `--auth session` 的项目必须用能识别该选项的生成器；旧版本读取项目元数据时会失败关闭。
+{{end}}
+{{if .Options.IsProduction}}
+## 生产档启动
+
+    cp .env.example .env
+{{if .Options.IsPostgres}}    cp .env.postgres.example .env.postgres
+    chmod 600 .env .env.postgres
+    # 先按 docs/postgres-operations.md 填写凭据、初始化数据库并应用已审查迁移
+{{end}}
+    make up
+
+生产档通过 Docker Compose 启动 API、Prometheus 和 Grafana。日常可使用 make logs、make down、make compose-config（静默验证，不打印秘密）。API 地址是 http://localhost:8080，Prometheus 是 http://localhost:9090，Grafana 是 http://localhost:3000。对外分享前请修改 .env 中的 GRAFANA_ADMIN_PASSWORD。
+{{else}}
 ## 启动
 
 ```bash
@@ -92,6 +154,7 @@ make run
 
 可访问 `/api/v1`、`/health/live`、`/health/ready`、`/openapi.json` 和 `/docs`。
 
+{{end}}
 ## 验证
 
 ```bash
@@ -112,6 +175,9 @@ CI 会先把已审查迁移应用到 PostgreSQL，再运行相同契约。
 {{if .Options.IsPostgres}}
 PostgreSQL 连接池默认最多 25 个连接、25 个空闲连接，连接最长存活 30 分钟、最长空闲 5 分钟；可通过 `DB_MAX_OPEN_CONNS`、`DB_MAX_IDLE_CONNS`、`DB_CONN_MAX_LIFETIME` 和 `DB_CONN_MAX_IDLE_TIME` 配置。启动时会在 `DB_CONNECT_TIMEOUT`（默认 5 秒）内执行数据库探测，失败则拒绝启动。
 {{end}}
+{{if .Options.IsProduction}}
+生产档额外提供 /metrics，记录 HTTP 请求量、耗时、并发数和数据库连接池指标，并预置 Prometheus 告警与 Grafana 看板。日志级别和服务元数据由 LOG_LEVEL、SERVICE_NAME、ENVIRONMENT、BUILD_VERSION 控制。
+{{end}}
 ## 镜像许可证
 
 固定的工具镜像和服务器镜像不使用本仓库的 MIT 许可证：
@@ -120,6 +186,8 @@ PostgreSQL 连接池默认最多 25 个连接、25 个空闲连接，连接最�
 {{if .Options.IsPostgres}}- `{{.Pins.PostgresImage}}`：PostgreSQL License
 {{end}}{{if .Options.HasRedis}}- `{{.Pins.RedisImage}}`：Redis 源码可用许可证（RSALv2 / SSPLv1 / AGPLv3），不是 MIT
 {{end}}{{if .Options.HasNATS}}- `{{.Pins.NATSImage}}`：Apache License 2.0
+{{end}}
+{{if .Options.IsProduction}}这个 profile 不生成 Kubernetes 清单，也不生成 CI 镜像发布/部署任务。
 {{end}}
 ## License
 

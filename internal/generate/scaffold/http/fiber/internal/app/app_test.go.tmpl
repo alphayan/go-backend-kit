@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"{{.Module}}/internal/platform/config"
+{{if .Options.IsProduction}}	"{{.Module}}/internal/platform/observability"
+{{end}}
 {{if .Options.HasJWT}}	"encoding/base64"
 	"strings"
 
@@ -31,6 +33,8 @@ func TestHealthDocsAndHTTPErrorEnvelope(t *testing.T) {
 	}
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	cfg := config.Config{RequestTimeout: 15 * time.Second}
+{{if .Options.IsProduction}}	metrics := observability.New(nil)
+{{end}}
 {{if .Options.HasJWT}}	secret := bytes32(t)
 	verifier, err := auth.NewVerifier(secret, "test-issuer", "test-audience", 30*time.Second)
 	if err != nil {
@@ -38,7 +42,7 @@ func TestHealthDocsAndHTTPErrorEnvelope(t *testing.T) {
 	}
 {{end}}{{if .Options.HasRedis}}	var redisClient *redis.Client
 {{end}}{{if .Options.HasNATS}}	var natsConn *nats.Conn
-{{end}}	app := New(cfg, db, logger{{if .Options.HasJWT}}, verifier{{end}}{{if .Options.HasRedis}}, redisClient{{end}}{{if .Options.HasNATS}}, natsConn{{end}})
+{{end}}	app := New(cfg, db, logger{{if .Options.IsProduction}}, metrics{{end}}{{if .Options.HasJWT}}, verifier{{end}}{{if .Options.HasRedis}}, redisClient{{end}}{{if .Options.HasNATS}}, natsConn{{end}})
 
 	live := request(t, app, "/health/live", nil)
 	if live.status != http.StatusOK {
@@ -47,7 +51,10 @@ func TestHealthDocsAndHTTPErrorEnvelope(t *testing.T) {
 	if live.header.Get("X-Request-ID") == "" || live.header.Get("X-Content-Type-Options") != "nosniff" {
 		t.Fatalf("middleware headers = %#v", live.header)
 	}
-	if response := request(t, app, "/openapi.json", nil); response.status != http.StatusOK {
+{{if .Options.IsProduction}}	if response := request(t, app, "/metrics", nil); response.status != http.StatusOK {
+		t.Fatalf("metrics status = %d, body = %s", response.status, response.body)
+	}
+{{end}}	if response := request(t, app, "/openapi.json", nil); response.status != http.StatusOK {
 		t.Fatalf("openapi status = %d", response.status)
 	}
 	if response := request(t, app, "/docs", nil); response.status != http.StatusOK {

@@ -8,6 +8,23 @@ permissions:
   contents: read
 
 jobs:
+{{if .Options.HasSession}}  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: {{.Pins.PNPM}}
+          run_install: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: {{.Pins.Node}}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm frontend:typecheck
+      - run: pnpm frontend:test
+      - run: pnpm frontend:build
+{{end}}
 {{if .Options.IsSQLite}}  sqlite:
     strategy:
       fail-fast: false
@@ -22,7 +39,13 @@ jobs:
           cache: true
       - run: go mod download
       - run: go tool gobackend check
-      - name: Test with CGO disabled
+{{if .Options.HasSession}}      - name: Require the session authentication migration
+        run: |
+          if ! find migrations -type f -name '*.sql' | grep -q .; then
+            echo 'session authentication exists but no versioned migration was committed'
+            exit 1
+          fi
+{{end}}      - name: Test with CGO disabled
         env:
           CGO_ENABLED: "0"
         run: go test -race ./...
@@ -66,6 +89,9 @@ jobs:
 {{end}}    env:
       DATABASE_URL: postgres://app:app@localhost:5432/app_test?sslmode=disable
       TEST_DATABASE_URL: postgres://app:app@localhost:5432/app_test?sslmode=disable
+{{if .Options.IsProduction}}      # Disposable CI migrations only; never reuse this identity for the deployed API.
+      ATLAS_DATABASE_URL: postgres://app:app@localhost:5432/app_test?sslmode=disable
+{{end}}
 {{if .Options.HasRedis}}      TEST_REDIS_URL: redis://127.0.0.1:6379/0
       REDIS_URL: redis://127.0.0.1:6379/0
 {{end}}{{if .Options.HasNATS}}      TEST_NATS_URL: nats://127.0.0.1:4222
@@ -80,8 +106,8 @@ jobs:
       - run: go tool gobackend check
       - name: Require migrations when resources exist
         run: |
-          if find resources -type f \( -name '*.yaml' -o -name '*.yml' \) | grep -q . && ! find migrations -type f -name '*.sql' | grep -q .; then
-            echo 'resources exist but no versioned migration was committed'
+          if {{if .Options.HasSession}}true{{else}}find resources -type f \( -name '*.yaml' -o -name '*.yml' \) | grep -q .{{end}} && ! find migrations -type f -name '*.sql' | grep -q .; then
+            echo '{{if .Options.HasSession}}resources or session authentication exist{{else}}resources exist{{end}} but no versioned migration was committed'
             exit 1
           fi
       - name: Apply and compare migrations
@@ -95,7 +121,12 @@ jobs:
               exit 1
             fi
           fi
-      - name: Test with PostgreSQL
+{{if .Options.HasSession}}      - name: Test shared login limits in separate processes
+        env:
+          TEST_RATE_DATABASE_URL: ${{ "{{" }} env.DATABASE_URL {{"}}"}}
+          TEST_RATE_DISPOSABLE: "1"
+        run: go test -race ./internal/platform/auth -run '^TestPostgresSharedLimiter$' -count=1
+{{end}}      - name: Test with PostgreSQL
         run: go test -race ./...
       - run: go vet ./...
       - run: go tool govulncheck ./...

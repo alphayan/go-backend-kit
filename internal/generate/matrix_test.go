@@ -12,6 +12,14 @@ import (
 )
 
 func TestPairwiseScaffoldMatrix(t *testing.T) {
+	productionEcho := generate.DefaultProjectOptions()
+	productionEcho.Profile = generate.ProfileProduction
+	productionFiber := productionEcho
+	productionFiber.HTTP = generate.HTTPFiber
+	productionSession := productionEcho
+	productionSession.Auth = generate.AuthSession
+	productionPostgres := productionSession
+	productionPostgres.Database = generate.DatabasePostgres
 	cases := []struct {
 		name string
 		opts generate.ProjectOptions
@@ -29,6 +37,18 @@ func TestPairwiseScaffoldMatrix(t *testing.T) {
 			HTTP: generate.HTTPFiber, Database: generate.DatabasePostgres, Cache: generate.CacheNone,
 			Messaging: generate.MessagingNATS, Logging: generate.LoggingSlog, Auth: generate.AuthNone,
 		}},
+		{"echo-sqlite-session", generate.ProjectOptions{
+			HTTP: generate.HTTPEcho, Database: generate.DatabaseSQLite, Cache: generate.CacheNone,
+			Messaging: generate.MessagingNone, Logging: generate.LoggingSlog, Auth: generate.AuthSession,
+		}},
+		{"echo-postgres-session", generate.ProjectOptions{
+			HTTP: generate.HTTPEcho, Database: generate.DatabasePostgres, Cache: generate.CacheNone,
+			Messaging: generate.MessagingNone, Logging: generate.LoggingSlog, Auth: generate.AuthSession,
+		}},
+		{"echo-production", productionEcho},
+		{"echo-sqlite-session-production", productionSession},
+		{"echo-postgres-session-production", productionPostgres},
+		{"fiber-production", productionFiber},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -57,6 +77,22 @@ func TestPairwiseScaffoldMatrix(t *testing.T) {
 			if output, err := command.CombinedOutput(); err != nil {
 				t.Fatalf("go test ./...: %v\n%s", err, output)
 			}
+			if test.name == "echo-sqlite-session" {
+				// Smoke only: catch broken or missing benchmarks, never assert timing in CI.
+				command := exec.Command("go", "test", "./internal/platform/auth", "-run=^$", "-bench=^BenchmarkPassword$", "-benchtime=1x", "-cpu=1,2", "-benchmem")
+				command.Dir = root
+				output, err := command.CombinedOutput()
+				if err != nil {
+					t.Fatalf("password benchmark smoke: %v\n%s", err, output)
+				}
+				for _, operation := range []string{"Argon2idHash", "Argon2idVerify", "PBKDF2Verify"} {
+					for _, mode := range []string{"serial", "parallel"} {
+						if !strings.Contains(string(output), "BenchmarkPassword/"+operation+"/"+mode) {
+							t.Errorf("password benchmark smoke missing %s/%s:\n%s", operation, mode, output)
+						}
+					}
+				}
+			}
 		})
 	}
 }
@@ -79,16 +115,18 @@ func assertSelectedDependencies(t *testing.T, root string, opts generate.Project
 		present[requirement.Mod.Path] = true
 	}
 	expect := map[string]bool{
-		"github.com/labstack/echo/v5":       opts.IsEcho(),
-		"github.com/gofiber/fiber/v3":       opts.IsFiber(),
-		"gorm.io/driver/postgres":           opts.IsPostgres(),
-		"github.com/redis/go-redis/v9":      opts.HasRedis(),
-		"github.com/nats-io/nats.go":        opts.HasNATS(),
-		"github.com/go-jose/go-jose/v4":     opts.HasJWT(),
-		"go.uber.org/zap":                   opts.IsZap(),
-		"github.com/samber/slog-zap/v2":     opts.IsZap(),
-		"github.com/rs/zerolog":             opts.IsZerolog(),
-		"github.com/samber/slog-zerolog/v2": opts.IsZerolog(),
+		"github.com/labstack/echo/v5":         opts.IsEcho(),
+		"github.com/gofiber/fiber/v3":         opts.IsFiber(),
+		"gorm.io/driver/postgres":             opts.IsPostgres(),
+		"github.com/redis/go-redis/v9":        opts.HasRedis(),
+		"github.com/nats-io/nats.go":          opts.HasNATS(),
+		"github.com/go-jose/go-jose/v4":       opts.HasJWT(),
+		"golang.org/x/crypto":                 opts.HasSession(),
+		"go.uber.org/zap":                     opts.IsZap(),
+		"github.com/samber/slog-zap/v2":       opts.IsZap(),
+		"github.com/rs/zerolog":               opts.IsZerolog(),
+		"github.com/samber/slog-zerolog/v2":   opts.IsZerolog(),
+		"github.com/prometheus/client_golang": opts.IsProduction(),
 	}
 	for path, want := range expect {
 		if present[path] != want {
@@ -97,7 +135,7 @@ func assertSelectedDependencies(t *testing.T, root string, opts generate.Project
 	}
 	compose := filepath.Join(root, "docker-compose.yml")
 	_, composeErr := os.Stat(compose)
-	wantCompose := opts.IsPostgres() || opts.HasRedis() || opts.HasNATS()
+	wantCompose := opts.IsProduction() || opts.IsPostgres() || opts.HasRedis() || opts.HasNATS()
 	if wantCompose && composeErr != nil {
 		t.Errorf("docker-compose.yml missing: %v", composeErr)
 	}
@@ -122,6 +160,13 @@ func assertSelectedDependencies(t *testing.T, root string, opts generate.Project
 		if opts.HasNATS() != strings.Contains(text, "nats:") {
 			t.Errorf("nats service presence mismatch in compose")
 		}
+		if opts.IsProduction() {
+			for _, required := range []string{"api:", "prometheus:", "grafana:", "127.0.0.1:8080:8080", "127.0.0.1:9090:9090", "127.0.0.1:3000:3000"} {
+				if !strings.Contains(text, required) {
+					t.Errorf("production compose missing %q", required)
+				}
+			}
+		}
 		if opts.IsPostgres() {
 			if strings.Contains(text, "/var/lib/postgresql/data") {
 				t.Errorf("postgres volume still mounts /var/lib/postgresql/data:\n%s", text)
@@ -136,6 +181,20 @@ func assertSelectedDependencies(t *testing.T, root string, opts generate.Project
 			}
 			if !strings.Contains(text, "127.0.0.1:8222/healthz") {
 				t.Errorf("compose does not check 127.0.0.1:8222/healthz:\n%s", text)
+			}
+		}
+	}
+	if opts.IsProduction() {
+		for _, name := range []string{
+			"Dockerfile",
+			".dockerignore",
+			"observability/prometheus.yml",
+			"observability/alerts.yml",
+			"observability/grafana/dashboards/backend.json",
+			"internal/platform/observability/observability.go",
+		} {
+			if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(name))); err != nil {
+				t.Errorf("production file %s missing: %v", name, err)
 			}
 		}
 	}

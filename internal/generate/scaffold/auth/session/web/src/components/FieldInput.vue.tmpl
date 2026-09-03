@@ -1,0 +1,56 @@
+<script setup lang="ts">
+import { computed } from "vue"
+import type { FieldDefinition } from "@/lib/resource"
+import type { FormValue } from "@/lib/forms"
+
+const props = defineProps<{ field: FieldDefinition; modelValue: FormValue; isNull: boolean; error?: string }>()
+const emit = defineEmits<{
+  "update:modelValue": [value: FormValue]
+  "update:isNull": [value: boolean]
+  touched: []
+}>()
+
+const inputType = computed(() => {
+  if (["int32", "int64", "float64", "decimal"].includes(props.field.type)) return "number"
+  if (props.field.type === "time") return "datetime-local"
+  return "text"
+})
+
+function update(event: Event) {
+  const target = event.target as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
+  emit("update:modelValue", props.field.type === "bool" && target instanceof HTMLInputElement ? target.checked : target.value)
+  emit("touched")
+}
+</script>
+
+<template>
+  <div class="field" :class="{ 'has-error': error }">
+    <div class="field-heading">
+      <label :for="`field-${field.name}`" v-text="field.label" />
+      <span v-if="field.required" class="required">Required</span>
+      <span v-else class="optional">Optional</span>
+    </div>
+    <label v-if="field.nullable" class="null-toggle">
+      <input type="checkbox" :checked="isNull" @change="emit('update:isNull', ($event.target as HTMLInputElement).checked); emit('touched')" />
+      Set an explicit null value
+    </label>
+    <template v-if="!isNull">
+      <select v-if="field.enumValues.length > 0" :id="`field-${field.name}`" :value="modelValue" :aria-invalid="Boolean(error)" :aria-describedby="error ? `error-${field.name}` : undefined" @change="update">
+        <option value="" disabled>Select an option</option>
+        <option v-for="option in field.enumValues" :key="option" :value="option" v-text="option" />
+      </select>
+      <label v-else-if="field.type === 'bool'" class="switch-row" :for="`field-${field.name}`">
+        <input :id="`field-${field.name}`" type="checkbox" :checked="Boolean(modelValue)" @change="update" />
+        <span v-text="modelValue ? 'Enabled' : 'Disabled'" />
+      </label>
+      <textarea v-else-if="field.type === 'text' || field.type === 'json'" :id="`field-${field.name}`" :value="String(modelValue)" :rows="field.type === 'json' ? 8 : 4" :aria-invalid="Boolean(error)" :aria-describedby="error ? `error-${field.name}` : undefined" :placeholder="field.type === 'json' ? '{\n  &quot;key&quot;: &quot;value&quot;\n}' : ''" @input="update" />
+      <input v-else :id="`field-${field.name}`" :type="inputType" :step="field.type === 'float64' || field.type === 'decimal' ? 'any' : undefined" :min="field.min" :max="field.max" :maxlength="field.maxLength" :value="String(modelValue)" :aria-invalid="Boolean(error)" :aria-describedby="error ? `error-${field.name}` : undefined" @input="update" />
+    </template>
+    <p v-if="error" :id="`error-${field.name}`" class="field-error" role="alert" v-text="error" />
+    <p v-else class="field-help">
+      <span v-if="field.maxLength" v-text="`Up to ${field.maxLength} characters. `" />
+      <span v-if="field.type === 'decimal'">Sent as a JSON string to avoid browser precision loss.</span>
+      <span v-if="field.type === 'json'">Enter valid JSON.</span>
+    </p>
+  </div>
+</template>

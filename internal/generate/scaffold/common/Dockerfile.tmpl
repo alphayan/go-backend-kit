@@ -1,0 +1,35 @@
+{{if .Options.HasSession}}FROM node:{{.Pins.Node}}-alpine3.24 AS frontend-build
+
+WORKDIR /src
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+RUN corepack enable && pnpm install --frozen-lockfile
+COPY web ./web
+RUN pnpm frontend:build
+
+{{end}}FROM golang:{{.Pins.GoVersion}}-alpine AS build
+
+WORKDIR /src
+
+COPY . .
+{{if .Options.HasSession}}COPY --from=frontend-build /src/web/dist ./web/dist
+{{end}}# The generator is a development tool, not a runtime dependency. Drop it only
+# inside this build stage, so source checkouts do not need a published kit tag.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go mod edit -droptool=github.com/alphayan/go-backend-kit/cmd/gobackend \
+      -droprequire=github.com/alphayan/go-backend-kit \
+      -dropreplace=github.com/alphayan/go-backend-kit \
+    && CGO_ENABLED=0 go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/api ./cmd/api
+
+FROM alpine:3.22
+
+RUN addgroup -S app && adduser -S -G app app && apk add --no-cache ca-certificates
+
+WORKDIR /app
+COPY --from=build /out/api /app/api
+RUN mkdir -p /app/data && chown -R app:app /app
+
+USER app
+EXPOSE 8080
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=5 CMD wget -q -O- http://127.0.0.1:8080/health/live >/dev/null || exit 1
+ENTRYPOINT ["/app/api"]

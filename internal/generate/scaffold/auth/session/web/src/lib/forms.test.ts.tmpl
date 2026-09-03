@@ -1,0 +1,50 @@
+import { describe, expect, it } from "vitest"
+import { buildPayload, initialValues } from "./forms"
+import type { FieldDefinition, ResourceRecord } from "./resource"
+
+const fields: FieldDefinition[] = [
+  { name: "name", label: "Name", type: "string", required: true, nullable: false, hasDefault: false, enumValues: [], filterable: false, sortable: false, searchable: true },
+  { name: "count", label: "Count", type: "int32", required: false, nullable: false, hasDefault: false, enumValues: [], filterable: true, sortable: true, searchable: false },
+  { name: "metadata", label: "Metadata", type: "json", required: false, nullable: true, hasDefault: false, enumValues: [], filterable: false, sortable: false, searchable: false },
+]
+
+describe("form serialization", () => {
+  it("sends required create fields and only touched optional fields", () => {
+    const values = initialValues(fields)
+    values.name = "Example"
+    values.count = "7"
+    expect(buildPayload(fields, values, new Set(), new Set(["count"]), "create")).toEqual({ name: "Example", count: 7 })
+  })
+
+  it("creates a minimal patch and preserves explicit null", () => {
+    const record = { id: 1, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z", name: "Old", count: 2, metadata: {} } satisfies ResourceRecord
+    const values = initialValues(fields, record)
+    values.name = "New"
+    expect(buildPayload(fields, values, new Set(["metadata"]), new Set(["name", "metadata"]), "update")).toEqual({ name: "New", metadata: null })
+  })
+
+  it("does not resend an untouched existing null in a patch", () => {
+    const record = { id: 1, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z", name: "Old", count: 2, metadata: null } satisfies ResourceRecord
+    const values = initialValues(fields, record)
+    values.name = "New"
+    expect(buildPayload(fields, values, new Set(["metadata"]), new Set(["name"]), "update")).toEqual({ name: "New" })
+  })
+
+  it("parses JSON and numeric inputs without changing decimal strings", () => {
+    const extended: FieldDefinition[] = [
+      ...fields,
+      { name: "price", label: "Price", type: "decimal", required: true, nullable: false, hasDefault: false, enumValues: [], filterable: false, sortable: false, searchable: false },
+    ]
+    const values = initialValues(extended)
+    values.name = "Example"
+    values.count = "8"
+    values.metadata = "{\"ok\":true}"
+    values.price = "9007199254740993.01"
+    expect(buildPayload(extended, values, new Set(), new Set(["count", "metadata"]), "create")).toEqual({
+      name: "Example",
+      count: 8,
+      metadata: { ok: true },
+      price: "9007199254740993.01",
+    })
+  })
+})

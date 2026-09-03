@@ -1,0 +1,61 @@
+<script setup lang="ts">
+import { ref } from "vue"
+import { changePassword, useAuth } from "@/lib/auth"
+import { messageFor } from "@/lib/api"
+
+const { identity } = useAuth()
+const currentPassword = ref("")
+const newPassword = ref("")
+const confirmation = ref("")
+const busy = ref(false)
+const error = ref("")
+const success = ref("")
+
+async function submit() {
+  error.value = ""
+  success.value = ""
+  if (newPassword.value.length < 12) {
+    error.value = "The new password must contain at least 12 characters."
+    return
+  }
+  if (newPassword.value !== confirmation.value) {
+    error.value = "The new passwords do not match."
+    return
+  }
+  busy.value = true
+  try {
+    await changePassword(currentPassword.value, newPassword.value)
+    currentPassword.value = ""
+    newPassword.value = ""
+    confirmation.value = ""
+    success.value = "Password changed. Other sessions were revoked."
+  } catch (reason) {
+    error.value = messageFor(reason)
+  } finally {
+    busy.value = false
+  }
+}
+</script>
+
+<template>
+  <div class="page-stack narrow-page">
+    <header class="page-header">
+      <div><p class="eyebrow">Account</p><h1>Security settings</h1><p class="page-lead">Change the password for <span v-text="identity?.email" />.</p></div>
+    </header>
+    <section class="settings-card">
+      <div class="settings-intro"><h2>Change password</h2><p>Changing your password revokes every existing session and issues a fresh session for this browser.</p></div>
+      <form class="settings-form" @submit.prevent="submit">
+        <label for="current-password">Current password</label>
+        <input id="current-password" v-model="currentPassword" type="password" autocomplete="current-password" required />
+        <label for="new-password">New password</label>
+        <input id="new-password" v-model="newPassword" type="password" minlength="12" maxlength="1024" autocomplete="new-password" required aria-describedby="password-hint" />
+        <p id="password-hint" class="field-help">Use at least 12 characters.</p>
+        <label for="confirm-password">Confirm new password</label>
+        <input id="confirm-password" v-model="confirmation" type="password" autocomplete="new-password" required />
+        <p v-if="error" class="form-error" role="alert" v-text="error" />
+        <p v-if="success" class="success-message" role="status" v-text="success" />
+        <button class="button primary" type="submit" :disabled="busy" v-text="busy ? 'Updating…' : 'Update password'" />
+      </form>
+    </section>
+  </div>
+</template>

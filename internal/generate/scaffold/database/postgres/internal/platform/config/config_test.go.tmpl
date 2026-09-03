@@ -134,3 +134,34 @@ func TestLoadRequiresJWTSettings(t *testing.T) {
 	}
 }
 {{end}}
+{{if .Options.HasSession}}
+func TestLoadSessionDefaultsAndBootstrapPair(t *testing.T) {
+	cfg, err := load(lookup(withBase(nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AuthSessionSecure != {{if .Options.IsProduction}}true{{else}}false{{end}} || cfg.AuthSessionTTL != 24*time.Hour || cfg.AuthSessionIdleTimeout != 2*time.Hour || cfg.AuthPasswordHashConcurrency != 4 {
+		t.Fatalf("session defaults = %+v", cfg)
+	}
+	if _, err := load(lookup(withBase(map[string]string{"AUTH_BOOTSTRAP_EMAIL": "admin@example.com"}))); err == nil || !strings.Contains(err.Error(), "must both be set") {
+		t.Fatalf("bootstrap pair error = %v", err)
+	}
+}
+
+func TestLoadRejectsInvalidSessionSettings(t *testing.T) {
+	tests := []struct{ key, value, want string }{
+		{"AUTH_PASSWORD_ARGON2_MEMORY_KIB", "7000", "OWASP published configuration"},
+		{"AUTH_PASSWORD_HASH_CONCURRENCY", "0", "between 1 and 64"},
+		{"AUTH_AUDIT_RETENTION_DAYS", "-1", "between 0"},
+		{"AUTH_AUDIT_RETENTION_DAYS", "36501", "between 0"},
+		{"AUTH_SESSION_IDLE_TIMEOUT", "25h", "at most AUTH_SESSION_TTL"},
+		{"AUTH_SESSION_SECURE", "sometimes", "must be a boolean"},
+	}
+{{if .Options.IsProduction}}	tests = append(tests, struct{ key, value, want string }{"AUTH_SESSION_SECURE", "false", "must be true"})
+{{end}}	for _, test := range tests {
+		if _, err := load(lookup(withBase(map[string]string{test.key: test.value}))); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Errorf("%s=%s error = %v, want %q", test.key, test.value, err, test.want)
+		}
+	}
+}
+{{end}}

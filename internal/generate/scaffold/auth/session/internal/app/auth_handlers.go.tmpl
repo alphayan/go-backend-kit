@@ -1,0 +1,203 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"net/mail"
+	"strings"
+	"time"
+
+	"{{.Module}}/internal/platform/apperror"
+	"{{.Module}}/internal/platform/audit"
+	"{{.Module}}/internal/platform/auth"
+	"{{.Module}}/internal/platform/config"
+	"{{.Module}}/internal/platform/httpx"
+	"github.com/labstack/echo/v5"
+)
+
+type authHandler struct {
+	cfg       config.Config
+	store     *auth.Store
+	passwords *auth.PasswordManager
+	limiter   *auth.LoginLimiter
+	audits    *audit.Store
+	logger    *slog.Logger
+}
+
+func newAuthHandler(cfg config.Config, store *auth.Store, passwords *auth.PasswordManager, audits *audit.Store, logger *slog.Logger) *authHandler {
+	return &authHandler{
+		cfg: cfg, store: store, passwords: passwords,
+		limiter: auth.NewLoginLimiter(store, cfg.AuthLoginRateLimit, cfg.AuthLoginRateWindow), audits: audits, logger: logger,
+	}
+}
+
+func registerAuthRoutes(e *echo.Echo, handler *authHandler) {
+	e.POST("/auth/login", handler.login)
+	e.POST("/auth/logout", handler.logout)
+	e.GET("/auth/me", handler.me, sessionMiddleware(handler.store, handler.cfg))
+	e.POST("/auth/password", handler.changePassword, sessionMiddleware(handler.store, handler.cfg))
+	admin := e.Group("/auth")
+	admin.Use(sessionMiddleware(handler.store, handler.cfg), handler.adminMiddleware())
+	admin.GET("/users", handler.listUsers)
+	admin.POST("/users", handler.createUser)
+	admin.PATCH("/users/:id", handler.updateUser)
+	admin.GET("/users/:id/sessions", handler.listSessions)
+	admin.DELETE("/users/:id/sessions", handler.revokeSessions)
+	admin.DELETE("/users/:id/sessions/:session_id", handler.revokeSessions)
+	admin.GET("/audit-logs", handler.listAudits)
+}
+
+type loginInput struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+func (h *authHandler) login(c *echo.Context) error {
+	var input loginInput
+	if err := httpx.DecodeJSON(c.Request().Body, &input); err != nil {
+		return httpx.WriteError(c, apperror.BadRequest("invalid_json", "request body must be valid JSON"))
+	}
+	input.Email = strings.ToLower(strings.TrimSpace(input.Email))
+	if !validEmail(input.Email) || input.Password == "" || len(input.Password) > 1024 {
+		return httpx.WriteError(c, apperror.BadRequest("invalid_credentials", "email and password are required"))
+	}
+	now := time.Now().UTC()
+	allowed, err := h.limiter.Allow(c.Request().Context(), c.RealIP(), input.Email, now)
+	if err != nil { return httpx.WriteError(c, err) }
+	if !allowed {
+		h.audit(c, nil, "rate_limit", "denied")
+		return httpx.WriteError(c, apperror.TooManyRequests())
+	}
+	permit, ok := h.passwords.TryAcquire()
+	if !ok {
+		h.audit(c, nil, "hash_capacity", "denied")
+		return httpx.WriteError(c, apperror.TooManyRequests())
+	}
+	defer permit.Release()
+
+	user, lookupErr := h.store.FindUserByEmail(c.Request().Context(), input.Email)
+	encoded := permit.DummyEncoding()
+	known := lookupErr == nil && user.DisabledAt == nil
+	if known {
+		encoded = user.PasswordHash
+	} else if lookupErr != nil && !errors.Is(lookupErr, auth.ErrUserNotFound) {
+		return httpx.WriteError(c, lookupErr)
+	}
+	valid, rehash, verifyErr := permit.Verify(encoded, input.Password)
+	if verifyErr != nil {
+		h.logger.ErrorContext(c.Request().Context(), "password verification failed", "error", verifyErr)
+		valid = false
+	}
+	if !known || !valid {
+		h.audit(c, nil, "login", "failure")
+		return httpx.WriteError(c, apperror.Unauthorized())
+	}
+	if err := h.limiter.ClearEmail(c.Request().Context(), input.Email); err != nil { return httpx.WriteError(c, err) }
+	if rehash {
+		if replacement, err := permit.Hash(input.Password); err != nil {
+			h.logger.ErrorContext(c.Request().Context(), "password rehash failed", "error", err)
+		} else if err := h.store.UpdatePasswordHash(c.Request().Context(), user.ID, replacement); err != nil {
+			h.logger.ErrorContext(c.Request().Context(), "password rehash update failed", "error", err)
+		}
+	}
+	previous := auth.SessionToken(c.Request(), h.cfg.AuthSessionSecure)
+	token, err := h.store.CreateSession(c.Request().Context(), user.ID, previous, c.Request().UserAgent(), c.RealIP(), h.cfg.AuthSessionTTL, now)
+	if err != nil {
+		h.audit(c, new(user.ID), "login", "failure")
+		return httpx.WriteError(c, err)
+	}
+	auth.SetSessionCookie(c.Response(), token, h.cfg.AuthSessionSecure, h.cfg.AuthSessionTTL)
+	h.audit(c, new(user.ID), "login", "success")
+	return httpx.WriteData(c, http.StatusOK, auth.Identity{UserID: user.ID, Email: user.Email, Role: user.Role})
+}
+
+func (h *authHandler) logout(c *echo.Context) error {
+	now := time.Now().UTC()
+	allowed, err := h.limiter.Allow(c.Request().Context(), c.RealIP(), "", now)
+	if err != nil { return httpx.WriteError(c, err) }
+	if !allowed {
+		h.audit(c, nil, "rate_limit", "denied")
+		return httpx.WriteError(c, apperror.TooManyRequests())
+	}
+	token := auth.SessionToken(c.Request(), h.cfg.AuthSessionSecure)
+	identity, lookupErr := h.store.ActorForToken(c.Request().Context(), token)
+	if lookupErr != nil && !errors.Is(lookupErr, auth.ErrSessionNotFound) {
+		return httpx.WriteError(c, lookupErr)
+	}
+	if err := h.store.DeleteSession(c.Request().Context(), token); err != nil {
+		return httpx.WriteError(c, err)
+	}
+	auth.ClearSessionCookie(c.Response(), h.cfg.AuthSessionSecure)
+	if lookupErr == nil {
+		h.audit(c, new(identity.UserID), "logout", "success")
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+func (h *authHandler) me(c *echo.Context) error {
+	identity, ok := auth.IdentityFromContext(c.Request().Context())
+	if !ok {
+		return httpx.WriteError(c, apperror.Unauthorized())
+	}
+	return httpx.WriteData(c, http.StatusOK, identity)
+}
+
+type passwordInput struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+func (h *authHandler) changePassword(c *echo.Context) error {
+	identity, ok := auth.IdentityFromContext(c.Request().Context())
+	if !ok {
+		return httpx.WriteError(c, apperror.Unauthorized())
+	}
+	var input passwordInput
+	if err := httpx.DecodeJSON(c.Request().Body, &input); err != nil {
+		return httpx.WriteError(c, apperror.BadRequest("invalid_json", "request body must be valid JSON"))
+	}
+	if len(input.NewPassword) < 12 || len(input.NewPassword) > 1024 || input.CurrentPassword == "" || len(input.CurrentPassword) > 1024 {
+		return httpx.WriteError(c, apperror.BadRequest("invalid_password", "new password must be between 12 and 1024 bytes"))
+	}
+	permit, acquired := h.passwords.TryAcquire()
+	if !acquired {
+		h.audit(c, new(identity.UserID), "hash_capacity", "denied")
+		return httpx.WriteError(c, apperror.TooManyRequests())
+	}
+	defer permit.Release()
+	user, err := h.store.FindUserByID(c.Request().Context(), identity.UserID)
+	if err != nil {
+		return httpx.WriteError(c, err)
+	}
+	valid, _, err := permit.Verify(user.PasswordHash, input.CurrentPassword)
+	if err != nil || !valid {
+		h.audit(c, new(identity.UserID), "password_change", "failure")
+		return httpx.WriteError(c, apperror.Unauthorized())
+	}
+	hash, err := permit.Hash(input.NewPassword)
+	if err != nil {
+		return httpx.WriteError(c, err)
+	}
+	token, err := h.store.ChangePasswordAndRotate(c.Request().Context(), identity.UserID, hash, c.Request().UserAgent(), c.RealIP(), h.cfg.AuthSessionTTL, time.Now().UTC())
+	if err != nil {
+		h.audit(c, new(identity.UserID), "password_change", "failure")
+		return httpx.WriteError(c, err)
+	}
+	auth.SetSessionCookie(c.Response(), token, h.cfg.AuthSessionSecure, h.cfg.AuthSessionTTL)
+	h.audit(c, new(identity.UserID), "password_change", "success")
+	return c.NoContent(http.StatusNoContent)
+}
+
+func (h *authHandler) audit(c *echo.Context, actorID *int64, action, outcome string) {
+	h.audits.BestEffort(context.WithoutCancel(c.Request().Context()), audit.Event{
+		ActorID: actorID, Action: action, Resource: "auth", Outcome: outcome,
+		RequestID: requestID(c), CreatedAt: time.Now().UTC(),
+	})
+}
+
+func validEmail(value string) bool {
+	address, err := mail.ParseAddress(value)
+	return err == nil && strings.EqualFold(address.Address, value) && len(value) <= 320
+}

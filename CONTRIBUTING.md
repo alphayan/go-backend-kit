@@ -1,6 +1,6 @@
 # Contributing
 
-Use Go 1.26.5 or newer. Changes to generator behavior should start with a failing test and include generated-project coverage when applicable.
+Use Go 1.27.1 or newer. Changes to generator behavior should start with a failing test and include generated-project coverage when applicable.
 
 Before opening a pull request, run:
 

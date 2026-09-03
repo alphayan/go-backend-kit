@@ -1,15 +1,33 @@
 package database
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/libtnb/sqlite"
 	"gorm.io/gorm"
 )
+
+func TestOpenDoesNotExposeMalformedDSN(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	for _, dsn := range []string{
+		"postgres://app:secret-DSN-marker@localhost:not-a-port/app",
+		"user=app password='secret-DSN-marker",
+	} {
+		_, err := Open(t.Context(), dsn, testPoolOptions())
+		if err == nil { t.Fatal("malformed DSN accepted") }
+		if strings.Contains(err.Error()+logs.String(), "secret-DSN-marker") { t.Fatal("DSN password exposed") }
+	}
+}
 
 func openTestSQLDB(t *testing.T) (*gorm.DB, *sql.DB) {
 	t.Helper()

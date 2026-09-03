@@ -1,0 +1,26 @@
+package web
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func TestHandlerServesIndexAndSPAFallback(t *testing.T) {
+	handler := Handler()
+	for _, route := range []string{"/", "/products/42"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, route, nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status = %d", route, response.Code)
+		}
+		body := response.Body.String()
+		if !strings.Contains(body, "Frontend build required") && !strings.Contains(body, `<div id="app"></div>`) {
+			t.Fatalf("%s did not serve the fallback or built index", route)
+		}
+		if got := response.Header().Get("Cache-Control"); got != "no-cache" {
+			t.Fatalf("%s Cache-Control = %q", route, got)
+		}
+	}
+}

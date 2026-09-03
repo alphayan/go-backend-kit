@@ -1,0 +1,163 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"strings"
+	"time"
+
+	"{{.Module}}/internal/generated"
+	"{{.Module}}/internal/platform/apperror"
+	"{{.Module}}/internal/platform/audit"
+	"{{.Module}}/internal/platform/auth"
+	"{{.Module}}/internal/platform/config"
+	"{{.Module}}/internal/platform/httpx"
+	"github.com/labstack/echo/v5"
+)
+
+func crossOriginMiddleware() echo.MiddlewareFunc {
+	protection := http.NewCrossOriginProtection()
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c *echo.Context) error {
+			if err := protection.Check(c.Request()); err != nil {
+				return httpx.WriteError(c, apperror.Forbidden())
+			}
+			return next(c)
+		}
+	}
+}
+
+func sessionMiddleware(store *auth.Store, cfg config.Config) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c *echo.Context) error {
+			token := auth.SessionToken(c.Request(), cfg.AuthSessionSecure)
+			identity, err := store.Authenticate(c.Request().Context(), token, time.Now().UTC(), cfg.AuthSessionIdleTimeout)
+			if err != nil {
+				if !errors.Is(err, auth.ErrSessionNotFound) {
+					return httpx.WriteError(c, err)
+				}
+				if token != "" {
+					auth.ClearSessionCookie(c.Response(), cfg.AuthSessionSecure)
+				}
+				return httpx.WriteError(c, apperror.Unauthorized())
+			}
+			request := c.Request().WithContext(auth.WithIdentity(c.Request().Context(), identity))
+			c.SetRequest(request)
+			return next(c)
+		}
+	}
+}
+
+func permissionMiddleware(audits *audit.Store) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c *echo.Context) error {
+			identity, ok := auth.IdentityFromContext(c.Request().Context())
+			route := c.RouteInfo()
+			code, known := generated.RoutePermissions[route.Method+" "+route.Path]
+			if !known && matchesPermissionPath(c.Request().URL.Path) {
+				return httpx.WriteError(c, echo.ErrMethodNotAllowed)
+			}
+			if !ok || !known || !generated.RolePermissions.Allows(identity.Role, code) {
+				resource := resourceFromPermission(code)
+				if resource == "" {
+					resource = "unknown"
+				}
+				var actorID *int64
+				if ok {
+					actorID = new(identity.UserID)
+				}
+				audits.BestEffort(context.WithoutCancel(c.Request().Context()), audit.Event{
+					ActorID: actorID, Action: "authorize", Resource: resource, Outcome: "denied",
+					RequestID: requestID(c), CreatedAt: time.Now().UTC(),
+				})
+				return httpx.WriteError(c, apperror.Forbidden())
+			}
+			return next(c)
+		}
+	}
+}
+
+func resourceAuditMiddleware(audits *audit.Store, logger *slog.Logger) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c *echo.Context) error {
+			if isSafeMethod(c.Request().Method) {
+				return next(c)
+			}
+			identity, ok := auth.IdentityFromContext(c.Request().Context())
+			code, known := generated.RoutePermissions[c.RouteInfo().Method+" "+c.RouteInfo().Path]
+			if !ok || !known {
+				return next(c)
+			}
+			err := next(c)
+			_, status := echo.ResolveResponseStatus(c.Response(), err)
+			outcome := "failure"
+			if status >= 200 && status < 300 {
+				outcome = "success"
+			}
+			parts := strings.SplitN(code, ".", 2)
+			resourceID := ""
+			if c.Request().Method == http.MethodPatch || c.Request().Method == http.MethodDelete {
+				resourceID = c.Param("id")
+			}
+			event := audit.Event{
+				ActorID: new(identity.UserID), Action: parts[1], Resource: parts[0], ResourceID: resourceID,
+				Outcome: outcome, RequestID: requestID(c), CreatedAt: time.Now().UTC(),
+			}
+			if writeErr := audits.Write(context.WithoutCancel(c.Request().Context()), event); writeErr != nil {
+				logger.ErrorContext(c.Request().Context(), "audit write failed", "error", writeErr, "action", event.Action, "resource", event.Resource)
+			}
+			return err
+		}
+	}
+}
+
+func resourceFromPermission(code string) string {
+	resource, _, ok := strings.Cut(code, ".")
+	if !ok {
+		return ""
+	}
+	return resource
+}
+
+func requestID(c *echo.Context) string {
+	if value := c.Response().Header().Get("X-Request-ID"); value != "" {
+		return value
+	}
+	return c.Request().Header.Get("X-Request-ID")
+}
+
+func isSafeMethod(method string) bool {
+	return method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions
+}
+
+func matchesPermissionPath(requestPath string) bool {
+	for key := range generated.RoutePermissions {
+		_, pattern, ok := strings.Cut(key, " ")
+		if ok && pathPatternMatches(pattern, requestPath) {
+			return true
+		}
+	}
+	return false
+}
+
+func pathPatternMatches(pattern, requestPath string) bool {
+	patternParts := strings.Split(strings.Trim(pattern, "/"), "/")
+	requestParts := strings.Split(strings.Trim(requestPath, "/"), "/")
+	if len(patternParts) != len(requestParts) {
+		return false
+	}
+	for index := range patternParts {
+		if strings.HasPrefix(patternParts[index], ":") {
+			if requestParts[index] == "" {
+				return false
+			}
+			continue
+		}
+		if patternParts[index] != requestParts[index] {
+			return false
+		}
+	}
+	return true
+}

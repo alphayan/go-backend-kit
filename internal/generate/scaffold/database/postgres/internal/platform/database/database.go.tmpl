@@ -10,6 +10,7 @@ import (
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 type PoolOptions struct {
@@ -27,12 +28,15 @@ type Connection struct {
 func Open(ctx context.Context, dsn string, options PoolOptions) (*Connection, error) {
 	orm, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
 		TranslateError: true,
+		DisableAutomaticPing: true,
 		NowFunc:        func() time.Time { return time.Now().UTC() },
-		Logger:         newSlogLogger(slog.Default()),
+		// Driver parse errors may embed the entire DSN, including its password.
+		Logger:         newSlogLogger(slog.Default()).LogMode(gormlogger.Silent),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("open database: %w", err)
+		return nil, errors.New("open database: invalid DATABASE_URL (driver details omitted to protect credentials)")
 	}
+	orm.Logger = newSlogLogger(slog.Default())
 	sqlDB, err := orm.DB()
 	if err != nil {
 		return nil, fmt.Errorf("access database pool: %w", err)
@@ -41,8 +45,51 @@ func Open(ctx context.Context, dsn string, options PoolOptions) (*Connection, er
 		_ = sqlDB.Close()
 		return nil, err
 	}
+{{if .Options.IsProduction}}	if err := validateRuntimeRole(ctx, sqlDB); err != nil {
+		_ = sqlDB.Close()
+		return nil, err
+	}
+{{end}}
 	return &Connection{ORM: orm, SQL: sqlDB}, nil
 }
+
+{{if .Options.IsProduction}}// Reject owner/bootstrap identities, including inherited privileges and SET ROLE.
+// This is a startup misconfiguration check, not protection against a database admin.
+func validateRuntimeRole(ctx context.Context, db *sql.DB) error {
+	var unsafe bool
+	err := db.QueryRowContext(ctx, `
+SELECT EXISTS (
+  SELECT 1 FROM pg_roles r
+  WHERE (r.rolname = session_user OR pg_has_role(session_user, r.oid, 'USAGE,SET'))
+    AND (
+      r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls
+      OR r.rolname IN ('pg_read_server_files', 'pg_write_server_files', 'pg_execute_server_program', 'pg_read_all_data', 'pg_write_all_data')
+      OR has_database_privilege(r.oid, current_database(), 'CREATE,TEMP')
+      OR EXISTS (SELECT 1 FROM pg_database d WHERE d.datname = current_database() AND pg_has_role(r.oid, d.datdba, 'USAGE,SET'))
+      OR EXISTS (
+        SELECT 1 FROM pg_namespace n
+        WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+          AND (has_schema_privilege(r.oid, n.oid, 'CREATE') OR pg_has_role(r.oid, n.nspowner, 'USAGE,SET'))
+      )
+      OR EXISTS (
+        SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+          AND (pg_has_role(r.oid, c.relowner, 'USAGE,SET')
+            OR (c.relname = 'atlas_schema_revisions' AND c.relkind IN ('r', 'p')
+              AND (has_any_column_privilege(r.oid, c.oid, 'INSERT,UPDATE')
+                OR has_table_privilege(r.oid, c.oid, 'DELETE,TRUNCATE,TRIGGER'))))
+      )
+    )
+)`).Scan(&unsafe)
+	if err != nil {
+		return fmt.Errorf("verify database runtime privileges: %w", err)
+	}
+	if unsafe {
+		return errors.New("production DATABASE_URL must use a runtime role without administrative, DDL, owner, or migration-ledger write privileges")
+	}
+	return nil
+}
+{{end}}
 
 func configureAndPing(ctx context.Context, db *sql.DB, options PoolOptions) error {
 	if options.MaxOpenConnections <= 0 {

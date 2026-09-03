@@ -12,7 +12,7 @@ func buildOpenAPI(resources []spec.Resource, opts ProjectOptions) (map[string]an
 	if err := opts.Validate(); err != nil {
 		return nil, err
 	}
-	if err := validateOpenAPIComponentNames(resources); err != nil {
+	if err := validateOpenAPIComponentNames(resources, opts); err != nil {
 		return nil, err
 	}
 	paths := map[string]any{}
@@ -23,6 +23,24 @@ func buildOpenAPI(resources []spec.Resource, opts ProjectOptions) (map[string]an
 				"code": map[string]any{"type": "string"}, "message": map[string]any{"type": "string"}, "details": map[string]any{}, "request_id": map[string]any{"type": "string"},
 			}}},
 		},
+	}
+	if opts.HasSession() {
+		schemas["Login"] = map[string]any{"type": "object", "additionalProperties": false, "required": []string{"email", "password"}, "properties": map[string]any{
+			"email":    map[string]any{"type": "string", "format": "email", "maxLength": 320},
+			"password": map[string]any{"type": "string", "format": "password", "maxLength": 1024},
+		}}
+		schemas["PasswordChange"] = map[string]any{"type": "object", "additionalProperties": false, "required": []string{"current_password", "new_password"}, "properties": map[string]any{
+			"current_password": map[string]any{"type": "string", "format": "password", "maxLength": 1024},
+			"new_password":     map[string]any{"type": "string", "format": "password", "minLength": 12, "maxLength": 1024},
+		}}
+		schemas["Session"] = map[string]any{"type": "object", "required": []string{"id", "email", "role"}, "properties": map[string]any{
+			"id": map[string]any{"type": "integer", "format": "int64"}, "email": map[string]any{"type": "string", "format": "email"}, "role": map[string]any{"type": "string", "enum": []string{"admin", "viewer"}},
+		}}
+		paths["/auth/login"] = map[string]any{"post": authOperation("Log in", ref("Login"), 200, dataSchema(ref("Session")), false, []string{"400", "401", "429", "500"})}
+		paths["/auth/logout"] = map[string]any{"post": authOperation("Log out", nil, 204, nil, false, []string{"429", "500"})}
+		paths["/auth/me"] = map[string]any{"get": authOperation("Current session user", nil, 200, dataSchema(ref("Session")), true, []string{"401", "500"})}
+		paths["/auth/password"] = map[string]any{"post": authOperation("Change password", ref("PasswordChange"), 204, nil, true, []string{"400", "401", "429", "500"})}
+		addAdminOpenAPI(paths, schemas)
 	}
 	for _, resource := range resources {
 		model, create, update := openAPISchemas(resource)
@@ -51,6 +69,14 @@ func buildOpenAPI(resources []spec.Resource, opts ProjectOptions) (map[string]an
 				"bearerFormat": "JWT",
 			},
 		}
+	} else if opts.HasSession() {
+		cookieName := "session"
+		if opts.IsProduction() {
+			cookieName = "__Host-session"
+		}
+		components["securitySchemes"] = map[string]any{
+			"sessionCookie": map[string]any{"type": "apiKey", "in": "cookie", "name": cookieName, "description": "Cookie name follows AUTH_SESSION_SECURE: __Host-session when true, session when false."},
+		}
 	}
 	return map[string]any{
 		"openapi":        "3.1.0",
@@ -62,8 +88,16 @@ func buildOpenAPI(resources []spec.Resource, opts ProjectOptions) (map[string]an
 	}, nil
 }
 
-func validateOpenAPIComponentNames(resources []spec.Resource) error {
+func validateOpenAPIComponentNames(resources []spec.Resource, opts ProjectOptions) error {
 	owners := map[string]string{"Error": "built-in error response"}
+	if opts.HasSession() {
+		owners["Login"] = "session login input"
+		owners["PasswordChange"] = "session password change input"
+		owners["Session"] = "session user response"
+		for _, name := range []string{"AuthUser", "AuthCreateUser", "AuthUpdateUser", "AuthSessionInfo", "AuthAuditLog"} {
+			owners[name] = "session administration"
+		}
+	}
 	claim := func(name, owner string) error {
 		if existing, exists := owners[name]; exists {
 			return fmt.Errorf("OpenAPI component schema %q is claimed by both %s and %s", name, existing, owner)
@@ -181,6 +215,8 @@ func operation(tag, summary string, body map[string]any, status int, responseSch
 	}
 	if opts.HasJWT() {
 		value["security"] = []any{map[string]any{"bearerAuth": []any{}}}
+	} else if opts.HasSession() {
+		value["security"] = []any{map[string]any{"sessionCookie": []any{}}}
 	}
 	responses := value["responses"].(map[string]any)
 	response := map[string]any{"description": fmt.Sprintf("HTTP %d", status)}
@@ -191,11 +227,86 @@ func operation(tag, summary string, body map[string]any, status int, responseSch
 	codes := []string{"400", "404", "409", "422", "500"}
 	if opts.HasJWT() {
 		codes = append([]string{"401"}, codes...)
+	} else if opts.HasSession() {
+		codes = append([]string{"401", "403", "429"}, codes...)
 	}
 	for _, code := range codes {
 		responses[code] = map[string]any{"description": "Error", "content": map[string]any{"application/json": map[string]any{"schema": ref("Error")}}}
 	}
 	return value
+}
+
+func authOperation(summary string, body map[string]any, status int, responseSchema map[string]any, protected bool, errorCodes []string) map[string]any {
+	value := map[string]any{"tags": []string{"Authentication"}, "summary": summary, "responses": map[string]any{}}
+	if body != nil {
+		value["requestBody"] = map[string]any{"required": true, "content": map[string]any{"application/json": map[string]any{"schema": body}}}
+	}
+	if protected {
+		value["security"] = []any{map[string]any{"sessionCookie": []any{}}}
+	}
+	responses := value["responses"].(map[string]any)
+	response := map[string]any{"description": fmt.Sprintf("HTTP %d", status)}
+	if responseSchema != nil {
+		response["content"] = map[string]any{"application/json": map[string]any{"schema": responseSchema}}
+	}
+	responses[fmt.Sprint(status)] = response
+	for _, code := range errorCodes {
+		responses[code] = map[string]any{"description": "Error", "content": map[string]any{"application/json": map[string]any{"schema": ref("Error")}}}
+	}
+	return value
+}
+
+func addAdminOpenAPI(paths, schemas map[string]any) {
+	id := map[string]any{"type": "integer", "format": "int64", "minimum": 1}
+	str := map[string]any{"type": "string"}
+	timestamp := map[string]any{"type": "string", "format": "date-time"}
+	role := map[string]any{"type": "string", "enum": []string{"admin", "viewer"}}
+	email := map[string]any{"type": "string", "format": "email", "maxLength": 320}
+	schemas["AuthUser"] = map[string]any{"type": "object", "required": []string{"id", "email", "role", "created_at", "updated_at"}, "properties": map[string]any{
+		"id": id, "email": email, "role": role, "disabled_at": timestamp, "created_at": timestamp, "updated_at": timestamp,
+	}}
+	schemas["AuthCreateUser"] = map[string]any{"type": "object", "additionalProperties": false, "required": []string{"email", "password", "role"}, "properties": map[string]any{
+		"email": email, "role": role, "password": map[string]any{"type": "string", "format": "password", "writeOnly": true, "minLength": 12, "maxLength": 1024, "description": "Server validates 12 to 1024 UTF-8 bytes."},
+	}}
+	schemas["AuthUpdateUser"] = map[string]any{"type": "object", "additionalProperties": false, "minProperties": 1, "description": "Cannot change your own role or status. Revokes all target sessions.", "properties": map[string]any{
+		"role": role, "disabled": map[string]any{"type": "boolean"},
+	}}
+	schemas["AuthSessionInfo"] = map[string]any{"type": "object", "required": []string{"id", "created_at", "expires_at", "last_seen_at", "user_agent", "ip"}, "properties": map[string]any{
+		"id": id, "created_at": timestamp, "expires_at": timestamp, "last_seen_at": timestamp, "user_agent": str, "ip": str,
+	}}
+	schemas["AuthAuditLog"] = map[string]any{"type": "object", "required": []string{"id", "actor_id", "action", "resource", "resource_id", "outcome", "request_id", "created_at"}, "properties": map[string]any{
+		"id": id, "actor_id": map[string]any{"type": []string{"integer", "null"}, "format": "int64"}, "action": str, "resource": str, "resource_id": str, "outcome": str, "request_id": str, "created_at": timestamp,
+	}}
+	pageParams := []any{queryParameter("page", "integer"), queryParameter("page_size", "integer")}
+	adminOperation := func(summary string, body map[string]any, status int, response map[string]any, params []any) map[string]any {
+		op := authOperation(summary, body, status, response, true, []string{"400", "401", "403", "404", "409", "429", "500"})
+		op["tags"] = []string{"Administration"}
+		op["description"] = "Requires an active admin session. Responses must not be cached."
+		if len(params) > 0 {
+			op["parameters"] = params
+		}
+		return op
+	}
+	paths["/auth/users"] = map[string]any{
+		"get":  adminOperation("List users (exact email filter)", nil, 200, pageSchema("AuthUser"), append(append([]any{}, pageParams...), queryParameter("email", "string"))),
+		"post": adminOperation("Create user", ref("AuthCreateUser"), 201, dataSchema(ref("AuthUser")), nil),
+	}
+	paths["/auth/users/{id}"] = map[string]any{"patch": adminOperation("Update user access", ref("AuthUpdateUser"), 200, dataSchema(ref("AuthUser")), idParameters())}
+	paths["/auth/users/{id}/sessions"] = map[string]any{
+		"get":    adminOperation("List active user sessions", nil, 200, pageSchema("AuthSessionInfo"), append(idParameters(), pageParams...)),
+		"delete": adminOperation("Revoke all user sessions", nil, 204, nil, idParameters()),
+	}
+	paths["/auth/users/{id}/sessions/{session_id}"] = map[string]any{"delete": adminOperation("Revoke one user session", nil, 204, nil,
+		append(idParameters(), map[string]any{"name": "session_id", "in": "path", "required": true, "schema": id}))}
+	filters := append([]any{}, pageParams...)
+	for _, field := range []string{"action", "resource", "outcome"} {
+		filters = append(filters, queryParameter(field, "string"))
+	}
+	filters = append(filters, queryParameter("actor_id", "integer"))
+	for _, field := range []string{"from", "to"} {
+		filters = append(filters, map[string]any{"name": field, "in": "query", "required": false, "schema": timestamp, "description": "RFC3339 timestamp; from inclusive, to exclusive."})
+	}
+	paths["/auth/audit-logs"] = map[string]any{"get": adminOperation("List audit logs newest first", nil, 200, pageSchema("AuthAuditLog"), filters)}
 }
 
 func ref(name string) map[string]any { return map[string]any{"$ref": "#/components/schemas/" + name} }
@@ -249,7 +360,7 @@ func buildSearchSQL(resource spec.Resource) string {
 	columns := searchColumns(resource)
 	parts := make([]string, len(columns))
 	for i, column := range columns {
-		parts[i] = "LOWER(" + sqlColumn(column) + ") LIKE ?"
+		parts[i] = "LOWER(" + sqlColumn(column) + ") LIKE ? ESCAPE '\\'"
 	}
 	return strings.Join(parts, " OR ")
 }

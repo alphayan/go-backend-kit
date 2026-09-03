@@ -1,0 +1,149 @@
+<script setup lang="ts">
+import { computed, ref, watch } from "vue"
+import { useQuery, useQueryClient } from "@tanstack/vue-query"
+import DataTable from "@/components/DataTable.vue"
+import ConfirmDialog from "@/components/ConfirmDialog.vue"
+import { APIError, apiRequest, messageFor, type Page } from "@/lib/api"
+import { loadSession, useAuth } from "@/lib/auth"
+import type { ColumnDefinition } from "@/lib/resource"
+
+type User = Record<string, unknown> & { id: number; email: string; role: string; disabled_at?: string; created_at: string }
+type Session = Record<string, unknown> & { id: number; created_at: string; expires_at: string; last_seen_at: string; ip: string; user_agent: string }
+const { identity } = useAuth()
+const client = useQueryClient()
+const page = ref(1)
+const emailFilter = ref("")
+const committedEmail = ref("")
+const form = ref<HTMLDialogElement>()
+const selected = ref<User>()
+const email = ref("")
+const password = ref("")
+const role = ref("viewer")
+const disabled = ref(false)
+const busy = ref(false)
+const error = ref("")
+const status = ref("")
+const sessionUser = ref<User>()
+const sessionPage = ref(1)
+const pendingRevoke = ref<{ user: User; session?: Session }>()
+const revokeError = ref("")
+
+const columns: ColumnDefinition[] = [
+  { key: "email", label: "Email", kind: "string", sortable: false },
+  { key: "role", label: "Role", kind: "string", sortable: false },
+  { key: "disabled_at", label: "Disabled since", kind: "timestamp", sortable: false },
+  { key: "created_at", label: "Created", kind: "timestamp", sortable: false },
+]
+const sessionColumns: ColumnDefinition[] = [
+  { key: "id", label: "Session", kind: "id", sortable: false },
+  { key: "user_agent", label: "Browser", kind: "string", sortable: false },
+  { key: "ip", label: "IP", kind: "string", sortable: false },
+  { key: "last_seen_at", label: "Last seen", kind: "timestamp", sortable: false },
+  { key: "expires_at", label: "Expires", kind: "timestamp", sortable: false },
+]
+const users = useQuery({
+  queryKey: computed(() => ["admin-users", page.value, committedEmail.value]),
+  queryFn: () => apiRequest<Page<User>>(`/auth/users?${new URLSearchParams({ page: String(page.value), email: committedEmail.value })}`),
+})
+const sessions = useQuery({
+  queryKey: computed(() => ["admin-sessions", sessionUser.value?.id, sessionPage.value]),
+  enabled: computed(() => sessionUser.value !== undefined),
+  queryFn: () => apiRequest<Page<Session>>(`/auth/users/${sessionUser.value?.id}/sessions?page=${sessionPage.value}`),
+})
+
+function handleError(reason: unknown): string {
+  if (reason instanceof APIError && reason.status === 401) window.dispatchEvent(new Event("auth:expired"))
+  return messageFor(reason)
+}
+watch(() => users.error.value ?? sessions.error.value, (reason) => { if (reason) handleError(reason) })
+
+function openForm(user?: User) {
+  selected.value = user
+  email.value = user?.email ?? ""
+  password.value = ""
+  role.value = user?.role ?? "viewer"
+  disabled.value = user?.disabled_at != null
+  error.value = ""
+  form.value?.showModal()
+}
+function closeForm() {
+  if (busy.value) return
+  form.value?.close()
+  password.value = ""
+}
+async function save() {
+  error.value = ""
+  busy.value = true
+  try {
+    const user = selected.value
+    await apiRequest<User>(user ? `/auth/users/${user.id}` : "/auth/users", {
+      method: user ? "PATCH" : "POST",
+      body: JSON.stringify(user ? { role: role.value, disabled: disabled.value } : { email: email.value, password: password.value, role: role.value }),
+    })
+    form.value?.close()
+    password.value = ""
+    status.value = user ? "User updated. Existing sessions revoked." : "User created."
+    await Promise.all([client.invalidateQueries({ queryKey: ["admin-users"] }), client.invalidateQueries({ queryKey: ["admin-sessions"] })])
+  } catch (reason) { error.value = handleError(reason) } finally { busy.value = false }
+}
+function confirmRevoke(user: User, session?: Session) {
+  revokeError.value = ""
+  pendingRevoke.value = { user, session }
+}
+async function revoke() {
+  const target = pendingRevoke.value
+  if (!target) return
+  busy.value = true
+  try {
+    await apiRequest<void>(`/auth/users/${target.user.id}/sessions${target.session ? `/${target.session.id}` : ""}`, { method: "DELETE" })
+    pendingRevoke.value = undefined
+    status.value = "Sessions revoked."
+    await client.invalidateQueries({ queryKey: ["admin-sessions"] })
+    if (target.user.id === identity.value?.id && await loadSession(true) === null) window.dispatchEvent(new Event("auth:expired"))
+  } catch (reason) { revokeError.value = handleError(reason) } finally { busy.value = false }
+}
+</script>
+
+<template>
+  <div class="page-stack">
+    <header class="page-header resource-header">
+      <div><p class="eyebrow">Administration</p><h1>Users</h1><p class="page-lead">Manage access with fixed admin and viewer roles.</p></div>
+      <button class="button primary" type="button" @click="openForm()">Create user</button>
+    </header>
+    <form class="search-box" role="search" @submit.prevent="page = 1; committedEmail = emailFilter.trim()">
+      <label class="sr-only" for="user-search">Filter by exact email</label>
+      <input id="user-search" v-model="emailFilter" type="search" placeholder="Exact email address" />
+      <button class="button secondary" type="submit">Search</button>
+    </form>
+    <p v-if="status" class="success-message" role="status" v-text="status" />
+    <p v-if="users.error.value" class="form-error" role="alert" v-text="messageFor(users.error.value)" />
+    <DataTable :columns="columns" :rows="users.data.value?.items ?? []" :loading="users.isFetching.value" :page="page" :total-pages="users.data.value?.total_pages ?? 0" :total="users.data.value?.total ?? 0" sort="" :can-write="true" @page="page = $event">
+      <template #actions="{ record }">
+        <button class="link-button" type="button" :disabled="record.id === identity?.id" :title="record.id === identity?.id ? 'You cannot change your own role or status' : undefined" @click="openForm(record)">Edit access</button>
+        <button class="link-button" type="button" @click="sessionUser = record; sessionPage = 1">Sessions</button>
+      </template>
+    </DataTable>
+    <section v-if="sessionUser" class="page-stack" aria-labelledby="sessions-heading">
+      <header class="page-header resource-header">
+        <h2 id="sessions-heading" v-text="`Active sessions: ${sessionUser.email}`" />
+        <button class="button secondary" type="button" @click="confirmRevoke(sessionUser)">Revoke all sessions</button>
+      </header>
+      <p v-if="sessions.error.value" class="form-error" role="alert" v-text="messageFor(sessions.error.value)" />
+      <DataTable :columns="sessionColumns" :rows="sessions.data.value?.items ?? []" :loading="sessions.isFetching.value" :page="sessionPage" :total-pages="sessions.data.value?.total_pages ?? 0" :total="sessions.data.value?.total ?? 0" sort="" :can-write="true" @page="sessionPage = $event">
+        <template #actions="{ record }"><button class="link-button danger-text" type="button" @click="sessionUser && confirmRevoke(sessionUser, record)">Revoke</button></template>
+      </DataTable>
+    </section>
+    <dialog ref="form" class="dialog" aria-labelledby="user-form-title" @cancel.prevent="closeForm">
+      <form class="dialog-body settings-form" @submit.prevent="save">
+        <h2 id="user-form-title" v-text="selected ? 'Edit user access' : 'Create user'" />
+        <label for="user-email">Email</label><input id="user-email" v-model="email" type="email" autocomplete="off" maxlength="320" :disabled="selected !== undefined || busy" required />
+        <template v-if="!selected"><label for="user-password">Initial password</label><input id="user-password" v-model="password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" :disabled="busy" required /><p class="field-help">At least 12 characters. Share securely; the user can change it in Account.</p></template>
+        <label for="user-role">Role</label><select id="user-role" v-model="role" :disabled="busy"><option value="viewer">Viewer (read only)</option><option value="admin">Admin (full access)</option></select>
+        <template v-if="selected"><label for="user-disabled">Account disabled</label><input id="user-disabled" v-model="disabled" type="checkbox" :disabled="busy" /><p class="field-help">Saving access changes revokes all of this user's sessions.</p></template>
+        <p v-if="error" class="form-error" role="alert" v-text="error" />
+        <div class="dialog-actions"><button class="button secondary" type="button" :disabled="busy" @click="closeForm">Cancel</button><button class="button primary" type="submit" :disabled="busy" v-text="busy ? 'Saving…' : 'Save user'" /></div>
+      </form>
+    </dialog>
+    <ConfirmDialog :open="pendingRevoke !== undefined" :busy="busy" :error="revokeError" title="Revoke access sessions?" :message="`The selected sessions for ${pendingRevoke?.user.email ?? ''} will be signed out.`" confirm-label="Revoke" @confirm="revoke" @cancel="pendingRevoke = undefined" />
+  </div>
+</template>

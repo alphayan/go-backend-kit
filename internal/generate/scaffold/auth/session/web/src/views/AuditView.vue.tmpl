@@ -1,0 +1,73 @@
+<script setup lang="ts">
+import { computed, reactive, ref, watch } from "vue"
+import { useQuery } from "@tanstack/vue-query"
+import DataTable from "@/components/DataTable.vue"
+import { APIError, apiRequest, messageFor, type Page } from "@/lib/api"
+import type { ColumnDefinition } from "@/lib/resource"
+
+type AuditRow = Record<string, unknown> & { id: number }
+const page = ref(1)
+const fields = [
+  { key: "actor_id", label: "Actor ID", type: "number" },
+  { key: "action", label: "Action", type: "text" },
+  { key: "resource", label: "Resource", type: "text" },
+  { key: "outcome", label: "Outcome", type: "text" },
+  { key: "from", label: "From (inclusive)", type: "datetime-local" },
+  { key: "to", label: "To (exclusive)", type: "datetime-local" },
+]
+const filters = reactive<Record<string, string>>({})
+const committed = ref("")
+const error = ref("")
+const columns: ColumnDefinition[] = [
+  { key: "created_at", label: "Time", kind: "timestamp", sortable: false },
+  { key: "actor_id", label: "Actor ID", kind: "id", sortable: false },
+  { key: "action", label: "Action", kind: "string", sortable: false },
+  { key: "resource", label: "Resource", kind: "string", sortable: false },
+  { key: "resource_id", label: "Record ID", kind: "string", sortable: false },
+  { key: "outcome", label: "Outcome", kind: "string", sortable: false },
+  { key: "request_id", label: "Request ID", kind: "string", sortable: false },
+]
+const audits = useQuery({
+  queryKey: computed(() => ["admin-audit", page.value, committed.value]),
+  queryFn: () => apiRequest<Page<AuditRow>>(`/auth/audit-logs?page=${page.value}&${committed.value}`),
+})
+watch(() => audits.error.value, (reason) => {
+  if (reason instanceof APIError && reason.status === 401) window.dispatchEvent(new Event("auth:expired"))
+})
+function applyFilters() {
+  error.value = ""
+  const params = new URLSearchParams()
+  for (const field of fields) {
+    const value = filters[field.key]?.trim()
+    if (!value) continue
+    if (field.type === "datetime-local") {
+      const date = new Date(value)
+      if (Number.isNaN(date.valueOf())) { error.value = "Enter valid dates."; return }
+      params.set(field.key, date.toISOString())
+    } else { params.set(field.key, value) }
+  }
+  if (params.has("from") && params.has("to") && params.get("from")! >= params.get("to")!) {
+    error.value = "From must be earlier than To."
+    return
+  }
+  page.value = 1
+  committed.value = params.toString()
+}
+</script>
+
+<template>
+  <div class="page-stack">
+    <header class="page-header"><div><p class="eyebrow">Administration</p><h1>Audit logs</h1><p class="page-lead">Newest events first. Filters match exact values. Times use your local timezone.</p></div></header>
+    <form class="toolbar" aria-label="Audit filters" @submit.prevent="applyFilters">
+      <div v-for="field in fields" :key="field.key" class="filter-control">
+        <label :for="`audit-${field.key}`" v-text="field.label" />
+        <input :id="`audit-${field.key}`" v-model="filters[field.key]" :type="field.type" :min="field.type === 'number' ? 1 : undefined" :maxlength="field.key === 'outcome' ? 32 : field.key === 'action' ? 64 : 128" />
+      </div>
+      <button class="button secondary" type="submit">Apply filters</button>
+      <button class="button secondary" type="button" :disabled="audits.isFetching.value" @click="audits.refetch()">Refresh</button>
+    </form>
+    <p v-if="error || audits.error.value" class="form-error" role="alert" v-text="error || messageFor(audits.error.value)" />
+    <DataTable :columns="columns" :rows="audits.data.value?.items ?? []" :loading="audits.isFetching.value" :page="page" :total-pages="audits.data.value?.total_pages ?? 0" :total="audits.data.value?.total ?? 0" sort="" :can-write="false" @page="page = $event" />
+    <p class="field-help">Audit writes are best-effort after business commits; this log is not a transaction ledger.</p>
+  </div>
+</template>

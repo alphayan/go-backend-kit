@@ -1,4 +1,4 @@
-.PHONY: generate check test vet vuln migration migrate-apply run
+.PHONY: generate check test vet vuln migration migrate-apply run{{if .Options.HasSession}} frontend-install frontend-dev frontend-typecheck frontend-test frontend-build frontend-e2e{{end}}{{if .Options.IsProduction}} up down logs compose-config{{end}}
 
 generate:
 	go tool gobackend generate
@@ -24,3 +24,36 @@ migrate-apply:
 
 run:
 	go run ./cmd/api
+{{if .Options.HasSession}}
+frontend-install:
+	pnpm install --frozen-lockfile
+
+frontend-dev:
+	pnpm frontend:dev
+
+frontend-typecheck:
+	pnpm frontend:typecheck
+
+frontend-test:
+	pnpm frontend:test
+
+frontend-build:
+	pnpm frontend:build
+
+frontend-e2e:
+	pnpm frontend:e2e
+{{end}}
+{{if .Options.IsProduction}}
+up:
+	@test -f .env || (echo "copy .env.example to .env first" && exit 1)
+	docker compose up -d --build
+
+down:
+	docker compose down
+
+logs:
+	docker compose logs -f --no-log-prefix api
+
+compose-config:
+	docker compose config --quiet
+{{end}}

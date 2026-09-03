@@ -202,6 +202,9 @@ func TestNewAddGenerateAndCheck(t *testing.T) {
 	if !strings.Contains(string(ci), `CGO_ENABLED: "0"`) {
 		t.Fatal("generated SQLite CI does not disable CGO")
 	}
+	if count := strings.Count(string(ci), "- name: Test with CGO disabled"); count != 1 {
+		t.Fatalf("generated SQLite CI has %d CGO test steps, want 1", count)
+	}
 	if strings.Contains(string(ci), "schema diff --env ci") || strings.Contains(string(ci), "postgres:") {
 		t.Fatal("default SQLite project CI still runs PostgreSQL schema-diff jobs")
 	}
@@ -210,6 +213,39 @@ func TestNewAddGenerateAndCheck(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "docker-compose.yml")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("default SQLite project emitted docker-compose.yml")
+	}
+	for _, name := range []string{"Dockerfile", ".dockerignore", "observability"} {
+		if _, err := os.Stat(filepath.Join(root, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("default personal project emitted production artifact %s", name)
+		}
+	}
+	envExample, err := os.ReadFile(filepath.Join(root, ".env.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(envExample), "LOG_LEVEL=") || strings.Contains(string(envExample), "SERVICE_NAME=") {
+		t.Fatal("default personal project emitted production logging configuration")
+	}
+	appError, err := os.ReadFile(filepath.Join(root, "internal", "platform", "apperror", "error.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(appError), "func Forbidden()") || strings.Contains(string(appError), "func TooManyRequests()") {
+		t.Fatal("auth=none project emitted session-only error constructors")
+	}
+	httpWriter, err := os.ReadFile(filepath.Join(root, "internal", "platform", "httpx", "write.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(httpWriter), `Set("WWW-Authenticate", "Bearer")`) {
+		t.Fatal("auth=none project changed its legacy 401 header behavior")
+	}
+	appSource, err := os.ReadFile(filepath.Join(root, "internal/app/app.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(appSource), "/metrics") || strings.Contains(string(appSource), "observability") {
+		t.Fatal("default personal project emitted production observability code")
 	}
 	atlas, err := os.ReadFile(filepath.Join(root, "scripts", "atlas.sh"))
 	if err != nil {
@@ -227,11 +263,11 @@ func TestNewAddGenerateAndCheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(moduleFile), "go 1.26.5\n") {
-		t.Fatal("generated go.mod does not pin go 1.26.5")
+	if !strings.Contains(string(moduleFile), "go 1.27.1\n") {
+		t.Fatal("generated go.mod does not pin go 1.27.1")
 	}
-	if strings.Contains(string(moduleFile), "toolchain ") && !strings.Contains(string(moduleFile), "toolchain go1.26.5") {
-		t.Fatal("generated go.mod pins a toolchain other than go1.26.5")
+	if strings.Contains(string(moduleFile), "toolchain ") && !strings.Contains(string(moduleFile), "toolchain go1.27.1") {
+		t.Fatal("generated go.mod pins a toolchain other than go1.27.1")
 	}
 	makefile, err := os.ReadFile(filepath.Join(root, "Makefile"))
 	if err != nil {
@@ -301,6 +337,64 @@ func TestNewPostgresProjectEmitsSchemaDiffCI(t *testing.T) {
 	}
 }
 
+func TestNewProductionProjectEmitsOptionalOperationsFiles(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "api")
+	opts := generate.DefaultProjectOptions()
+	opts.Profile = generate.ProfileProduction
+	g := testGenerator(t)
+	if err := g.New(t.Context(), root, "example.com/api", opts); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Check(t.Context(), root); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"Dockerfile",
+		".dockerignore",
+		"docker-compose.yml",
+		"observability/prometheus.yml",
+		"observability/alerts.yml",
+		"observability/grafana/dashboards/backend.json",
+		"internal/platform/observability/observability.go",
+		"internal/platform/observability/observability_test.go",
+	} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(name))); err != nil {
+			t.Errorf("production file %s missing: %v", name, err)
+		}
+	}
+	compose, err := os.ReadFile(filepath.Join(root, "docker-compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	composeText := string(compose)
+	for _, required := range []string{"api:", "prometheus:", "grafana:", "healthcheck:", "restart: unless-stopped"} {
+		if !strings.Contains(composeText, required) {
+			t.Errorf("production compose missing %q", required)
+		}
+	}
+	makefile, err := os.ReadFile(filepath.Join(root, "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"up:", "down:", "logs:", "compose-config:"} {
+		if !strings.Contains(string(makefile), required) {
+			t.Errorf("production Makefile missing %q", required)
+		}
+	}
+	module, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(module), "github.com/prometheus/client_golang") {
+		t.Fatal("production go.mod is missing Prometheus client dependency")
+	}
+	for _, name := range []string{"k8s", "kubernetes", "helm", "kustomize"} {
+		if _, err := os.Stat(filepath.Join(root, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("production profile emitted out-of-scope directory %s", name)
+		}
+	}
+}
+
 func TestCheckDetectsDrift(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "api")
@@ -314,6 +408,81 @@ func TestCheckDetectsDrift(t *testing.T) {
 	}
 	if err := g.Check(ctx, root); err == nil {
 		t.Fatal("Check() error = nil, want drift error")
+	}
+}
+
+func TestSessionPermissionsMarkerPreservingDriftIsDetectedAndRewritten(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "api")
+	g := testGenerator(t)
+	opts := generate.DefaultProjectOptions()
+	opts.Auth = generate.AuthSession
+	if err := g.New(t.Context(), root, "example.com/api", opts); err != nil {
+		t.Fatal(err)
+	}
+	appError, err := os.ReadFile(filepath.Join(root, "internal", "platform", "apperror", "error.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(appError), "func Forbidden()") || !strings.Contains(string(appError), "func TooManyRequests()") {
+		t.Fatal("auth=session project is missing session error constructors")
+	}
+	httpWriter, err := os.ReadFile(filepath.Join(root, "internal", "platform", "httpx", "write.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(httpWriter), "WWW-Authenticate") {
+		t.Fatal("auth=session project emitted a Bearer authentication header")
+	}
+	path := filepath.Join(root, "internal", "generated", "permissions_gen.go")
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modified := append(bytes.Clone(original), []byte("\n// local edit\n")...)
+	if err := os.WriteFile(path, modified, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Check(t.Context(), root); err == nil || !strings.Contains(err.Error(), "permissions_gen.go") {
+		t.Fatalf("Check() error = %v, want permissions drift", err)
+	}
+	if err := g.Generate(t.Context(), root); err != nil {
+		t.Fatal(err)
+	}
+	rewritten, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rewritten, original) {
+		t.Fatal("Generate() did not restore permissions output")
+	}
+}
+
+func TestSessionPermissionsMarkerStrippedCopyIsNotOverwritten(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "api")
+	g := testGenerator(t)
+	opts := generate.DefaultProjectOptions()
+	opts.Auth = generate.AuthSession
+	if err := g.New(t.Context(), root, "example.com/api", opts); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "internal", "generated", "permissions_gen.go")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = bytes.Replace(data, []byte("// Code generated by gobackend; DO NOT EDIT.\n"), nil, 1)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Generate(t.Context(), root); err == nil || !strings.Contains(err.Error(), "unowned") {
+		t.Fatalf("Generate() error = %v, want unowned refusal", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatal("unowned permissions file changed")
 	}
 }
 

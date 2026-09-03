@@ -7,6 +7,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+{{if .Options.HasSession}}	"sync"
+{{end}}
 {{if .Options.IsEcho}}
 	"errors"
 	"net/http"
@@ -16,7 +18,11 @@ import (
 	"{{.Module}}/internal/platform/config"
 	"{{.Module}}/internal/platform/database"
 	"{{.Module}}/internal/platform/logging"
+{{if .Options.IsProduction}}	"{{.Module}}/internal/platform/observability"
+{{end}}
 {{if .Options.HasJWT}}	"{{.Module}}/internal/platform/auth"
+{{end}}{{if .Options.HasSession}}	"{{.Module}}/internal/platform/auth"
+	"{{.Module}}/internal/platform/audit"
 {{end}}{{if .Options.HasRedis}}	"{{.Module}}/internal/platform/cache"
 {{end}}{{if .Options.HasNATS}}	"{{.Module}}/internal/platform/messaging"
 {{end}})
@@ -46,7 +52,20 @@ func run() (exitCode int) {
 		logger.Error("invalid configuration", "error", err)
 		return 1
 	}
-{{if .Options.IsPostgres}}	startupContext, cancelStartup := context.WithTimeout(context.Background(), cfg.DatabaseConnectTimeout)
+{{if .Options.HasSession}}	for _, warning := range cfg.Warnings {
+		logger.Warn("configuration warning", "warning", warning)
+	}
+	runContext, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+{{end}}
+{{if .Options.IsProduction}}	logger = logger.With(
+		slog.String("service", cfg.ServiceName),
+		slog.String("environment", cfg.Environment),
+		slog.String("version", cfg.BuildVersion),
+	)
+	slog.SetDefault(logger)
+{{end}}
+{{if .Options.IsPostgres}}	startupContext, cancelStartup := context.WithTimeout({{if .Options.HasSession}}runContext{{else}}context.Background(){{end}}, cfg.DatabaseConnectTimeout)
 	connection, err := database.Open(startupContext, cfg.DatabaseURL, database.PoolOptions{
 		MaxOpenConnections:    cfg.DatabaseMaxOpenConnections,
 		MaxIdleConnections:    cfg.DatabaseMaxIdleConnections,
@@ -54,7 +73,7 @@ func run() (exitCode int) {
 		ConnectionMaxIdleTime: cfg.DatabaseConnectionMaxIdleTime,
 	})
 	cancelStartup()
-{{else}}	startupContext, cancelStartup := context.WithTimeout(context.Background(), cfg.DatabaseConnectTimeout)
+{{else}}	startupContext, cancelStartup := context.WithTimeout({{if .Options.HasSession}}runContext{{else}}context.Background(){{end}}, cfg.DatabaseConnectTimeout)
 	connection, err := database.Open(startupContext, cfg.DatabasePath)
 	cancelStartup()
 {{end}}	if err != nil {
@@ -67,6 +86,46 @@ func run() (exitCode int) {
 			exitCode = 1
 		}
 	}()
+{{if .Options.HasSession}}
+	passwords, err := auth.NewPasswordManager(auth.PasswordParams{
+		MemoryKiB: cfg.AuthPasswordArgon2MemoryKiB, Time: cfg.AuthPasswordArgon2Time,
+		Parallelism: cfg.AuthPasswordArgon2Parallelism,
+	}, cfg.AuthPasswordHashConcurrency)
+	if err != nil {
+		logger.Error("password manager construction failed", "error", err)
+		return 1
+	}
+	authStore := auth.NewStore(connection.ORM)
+	created, ignored, err := authStore.Bootstrap(runContext, cfg.AuthBootstrapEmail, cfg.AuthBootstrapPassword, passwords)
+	if err != nil {
+		logger.Error("session authentication bootstrap failed", "error", err)
+		return 1
+	}
+	if created {
+		logger.Warn("bootstrap administrator created; remove AUTH_BOOTSTRAP_EMAIL and AUTH_BOOTSTRAP_PASSWORD, then rotate the password immediately")
+	}
+	if ignored {
+		logger.Warn("bootstrap credentials ignored because an auth user already exists; remove AUTH_BOOTSTRAP_EMAIL and AUTH_BOOTSTRAP_PASSWORD")
+	}
+	var authWorkers sync.WaitGroup
+	if cfg.AuthAuditRetentionDays > 0 {
+		authWorkers.Go(func() {
+			audit.NewStore(connection.ORM, logger).SweepRetention(runContext, cfg.AuthAuditRetentionDays)
+		})
+	}
+	authWorkers.Go(func() {
+		authStore.SweepExpired(runContext, time.Hour, func(err error) {
+			logger.Error("session expiry sweep failed", "error", err)
+		})
+	})
+	defer func() {
+		cancelRun()
+		authWorkers.Wait()
+	}()
+{{end}}
+{{if .Options.IsProduction}}
+	metrics := observability.New(connection.SQL)
+{{end}}
 {{if .Options.HasRedis}}
 	redisContext, cancelRedis := context.WithTimeout(context.Background(), cfg.RedisConnectTimeout)
 	redisClient, err := cache.Open(redisContext, cfg.RedisURL)
@@ -100,7 +159,7 @@ func run() (exitCode int) {
 		return 1
 	}
 {{end}}
-{{if .Options.IsEcho}}	handler := app.New(cfg, connection.ORM, logger{{if .Options.HasJWT}}, verifier{{end}}{{if .Options.HasRedis}}, redisClient{{end}}{{if .Options.HasNATS}}, natsConn{{end}})
+{{if .Options.IsEcho}}	handler := app.New(cfg, connection.ORM, logger{{if .Options.IsProduction}}, metrics{{end}}{{if .Options.HasJWT}}, verifier{{end}}{{if .Options.HasSession}}, authStore, passwords{{end}}{{if .Options.HasRedis}}, redisClient{{end}}{{if .Options.HasNATS}}, natsConn{{end}})
 	server := &http.Server{
 		Addr:              cfg.Address,
 		Handler:           handler,
@@ -123,13 +182,15 @@ func run() (exitCode int) {
 			exitCode = 1
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+{{if .Options.HasSession}}	cancelRun()
+	authWorkers.Wait()
+{{end}}	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil {
 		logger.Error("graceful shutdown failed", "error", err)
 		exitCode = 1
 	}
-{{else}}	fiberApp := app.New(cfg, connection.ORM, logger{{if .Options.HasJWT}}, verifier{{end}}{{if .Options.HasRedis}}, redisClient{{end}}{{if .Options.HasNATS}}, natsConn{{end}})
+{{else}}	fiberApp := app.New(cfg, connection.ORM, logger{{if .Options.IsProduction}}, metrics{{end}}{{if .Options.HasJWT}}, verifier{{end}}{{if .Options.HasRedis}}, redisClient{{end}}{{if .Options.HasNATS}}, natsConn{{end}})
 	serverErrors := make(chan error, 1)
 	go func() {
 		logger.Info("server starting", "address", cfg.Address)

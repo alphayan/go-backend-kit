@@ -1,0 +1,65 @@
+import { readonly, ref } from "vue"
+import { APIError, apiRequest } from "./api"
+
+export interface Identity {
+  id: number
+  email: string
+  role: "admin" | "viewer" | string
+}
+
+const identity = ref<Identity | null>(null)
+let sessionRequest: Promise<Identity | null> | null = null
+
+export function useAuth() {
+  return { identity: readonly(identity) }
+}
+
+export async function loadSession(force = false): Promise<Identity | null> {
+  if (!force && identity.value !== null) {
+    return identity.value
+  }
+  if (sessionRequest !== null) {
+    return sessionRequest
+  }
+  sessionRequest = apiRequest<Identity>("/auth/me")
+    .then((value) => {
+      identity.value = value
+      return value
+    })
+    .catch((error: unknown) => {
+      if (error instanceof APIError && error.status === 401) {
+        identity.value = null
+        return null
+      }
+      throw error
+    })
+    .finally(() => {
+      sessionRequest = null
+    })
+  return sessionRequest
+}
+
+export async function login(email: string, password: string): Promise<Identity> {
+  const value = await apiRequest<Identity>("/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  })
+  identity.value = value
+  return value
+}
+
+export async function logout(): Promise<void> {
+  try {
+    await apiRequest<void>("/auth/logout", { method: "POST" })
+  } finally {
+    identity.value = null
+  }
+}
+
+export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  await apiRequest<void>("/auth/password", {
+    method: "POST",
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  })
+  await loadSession(true)
+}

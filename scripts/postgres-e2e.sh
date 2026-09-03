@@ -19,7 +19,7 @@ if [ -z "${DATABASE_URL:-}" ]; then
     -e POSTGRES_DB=kit_test \
     -e POSTGRES_USER=kit \
     -e POSTGRES_PASSWORD=kit \
-    -P postgres:18.4-alpine3.24)
+    -p 127.0.0.1::5432 postgres:18.6-alpine3.24)
   container=$created_container
   port=$(docker port "$container" 5432/tcp | head -n 1 | awk -F: '{print $NF}')
   DATABASE_URL="postgres://kit:kit@localhost:${port}/kit_test?sslmode=disable"

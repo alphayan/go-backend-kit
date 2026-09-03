@@ -3,13 +3,38 @@ package logging
 import (
 	"log/slog"
 	"os"
+{{if .Options.IsProduction}}	"strings"
+{{end}}
 
 	"github.com/rs/zerolog"
 	slogzerolog "github.com/samber/slog-zerolog/v2"
 )
 
 func New() (*slog.Logger, func() error, error) {
+{{if .Options.IsProduction}}
+	level := zerolog.InfoLevel
+	if parsed, err := zerolog.ParseLevel(strings.ToLower(strings.TrimSpace(os.Getenv("LOG_LEVEL")))); err == nil {
+		level = parsed
+	}
+	zero := zerolog.New(os.Stdout).Level(level).With().Timestamp().Logger()
+{{else}}
 	zero := zerolog.New(os.Stdout).With().Timestamp().Logger()
-	logger := slog.New(slogzerolog.Option{Level: slog.LevelInfo, Logger: &zero}.NewZerologHandler())
+{{end}}
+	logger := slog.New(slogzerolog.Option{Level: {{if .Options.IsProduction}}slogLevel(){{else}}slog.LevelInfo{{end}}, Logger: &zero}.NewZerologHandler())
 	return logger, func() error { return nil }, nil
 }
+
+{{if .Options.IsProduction}}
+func slogLevel() slog.Level {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("LOG_LEVEL"))) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+{{end}}

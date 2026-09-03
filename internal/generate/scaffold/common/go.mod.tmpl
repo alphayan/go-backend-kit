@@ -31,10 +31,12 @@ require (
 {{end}}{{if .Options.HasRedis}}	github.com/redis/go-redis/v9 {{.Pins.Redis}}
 {{end}}{{if .Options.HasNATS}}	github.com/nats-io/nats.go {{.Pins.NATS}}
 {{end}}{{if .Options.HasJWT}}	github.com/go-jose/go-jose/v4 {{.Pins.Jose}}
+{{end}}{{if .Options.HasSession}}	golang.org/x/crypto {{.Pins.Crypto}}
 {{end}}{{if .Options.IsZap}}	go.uber.org/zap {{.Pins.Zap}}
 	github.com/samber/slog-zap/v2 {{.Pins.SlogZap}}
 {{end}}{{if .Options.IsZerolog}}	github.com/rs/zerolog {{.Pins.Zerolog}}
 	github.com/samber/slog-zerolog/v2 {{.Pins.SlogZerolog}}
+{{end}}{{if .Options.IsProduction}}	github.com/prometheus/client_golang {{.Pins.Prometheus}}
 {{end}})
 {{if .DevelopmentReplace}}
 replace github.com/alphayan/go-backend-kit => {{.DevelopmentReplace}}

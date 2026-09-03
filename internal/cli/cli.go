@@ -31,7 +31,7 @@ func New(info BuildInfo, stdout, stderr io.Writer) *cobra.Command {
 	}
 	root.SetOut(stdout)
 	root.SetErr(stderr)
-	root.AddCommand(newCommand(info), addCommand(info), generateCommand(info), checkCommand(info), versionCommand(info))
+	root.AddCommand(newCommand(info), addCommand(info), generateCommand(info), checkCommand(info), upgradeCommand(info), versionCommand(info))
 	return root
 }
 
@@ -56,20 +56,27 @@ func newCommand(info BuildInfo) *cobra.Command {
 	messagingChoice := string(generate.MessagingNone)
 	loggingChoice := string(generate.LoggingSlog)
 	authChoice := string(generate.AuthNone)
+	profileChoice := string(generate.ProfilePersonal)
 	registerChoiceFlag(command, "http", &httpChoice, string(generate.HTTPEcho), "HTTP framework", []string{"echo", "fiber"})
-	registerChoiceFlag(command, "database", &databaseChoice, string(generate.DatabaseSQLite), "database", []string{"sqlite", "postgres"})
+	registerChoiceFlag(command, "database", &databaseChoice, string(generate.DatabaseSQLite), "database (production defaults to postgres)", []string{"sqlite", "postgres"})
 	registerChoiceFlag(command, "cache", &cacheChoice, string(generate.CacheNone), "cache", []string{"none", "redis"})
 	registerChoiceFlag(command, "messaging", &messagingChoice, string(generate.MessagingNone), "messaging", []string{"none", "nats"})
 	registerChoiceFlag(command, "logging", &loggingChoice, string(generate.LoggingSlog), "logging backend", []string{"slog", "zap", "zerolog"})
-	registerChoiceFlag(command, "auth", &authChoice, string(generate.AuthNone), "authentication", []string{"none", "jwt"})
+	registerChoiceFlag(command, "auth", &authChoice, string(generate.AuthNone), "authentication", generate.AuthChoices())
+	registerChoiceFlag(command, "profile", &profileChoice, string(generate.ProfilePersonal), "project profile", []string{"personal", "production"})
 	command.RunE = func(cmd *cobra.Command, args []string) error {
+		database := generate.DatabaseChoice(databaseChoice)
+		if profileChoice == string(generate.ProfileProduction) && !cmd.Flags().Changed("database") {
+			database = generate.DatabasePostgres
+		}
 		return (generate.Generator{Version: releaseVersion(info.Version), DevelopmentReplace: os.Getenv("GOBACKEND_DEVELOPMENT_REPLACE")}).New(cmd.Context(), args[0], modulePath, generate.ProjectOptions{
 			HTTP:      generate.HTTPChoice(httpChoice),
-			Database:  generate.DatabaseChoice(databaseChoice),
+			Database:  database,
 			Cache:     generate.CacheChoice(cacheChoice),
 			Messaging: generate.MessagingChoice(messagingChoice),
 			Logging:   generate.LoggingChoice(loggingChoice),
 			Auth:      generate.AuthChoice(authChoice),
+			Profile:   generate.ProfileChoice(profileChoice),
 		})
 	}
 	return command
@@ -113,6 +120,41 @@ func checkCommand(info BuildInfo) *cobra.Command {
 	}
 }
 
+func upgradeCommand(info BuildInfo) *cobra.Command {
+	var options generate.UpgradeOptions
+	command := &cobra.Command{
+		Use:   "upgrade",
+		Short: "Preview scaffold upgrades; apply explicitly after reviewing conflicts",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			report, err := (generate.Generator{Version: releaseVersion(info.Version), DevelopmentReplace: os.Getenv("GOBACKEND_DEVELOPMENT_REPLACE")}).Upgrade(cmd.Context(), ".", options)
+			for _, change := range report.Changes {
+				if _, writeErr := fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\n", change.Action, change.Path); writeErr != nil {
+					return writeErr
+				}
+			}
+			if report.Directory != "" {
+				if _, writeErr := fmt.Fprintf(cmd.OutOrStdout(), "Review/recovery directory: %s\n", report.Directory); writeErr != nil {
+					return writeErr
+				}
+			}
+			if err != nil {
+				return err
+			}
+			if report.Applied {
+				_, err = fmt.Fprintln(cmd.OutOrStdout(), "Upgrade applied. Review go.mod, regenerate/check, test, and migrate explicitly before deployment.")
+			} else {
+				_, err = fmt.Fprintln(cmd.OutOrStdout(), "Preview only; project source files were not changed. Use --apply after review.")
+			}
+			return err
+		},
+	}
+	command.Flags().BoolVar(&options.Apply, "apply", false, "apply a conflict-free upgrade with original-file backups")
+	command.Flags().StringVar(&options.Baseline, "baseline", "", "verified pristine old project for projects without a scaffold baseline")
+	command.Flags().StringSliceVar(&options.Keep, "keep", nil, "explicitly retain each manually merged scaffold path and advance its upstream baseline")
+	return command
+}
+
 func versionCommand(info BuildInfo) *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
@@ -154,7 +196,7 @@ func versionCommand(info BuildInfo) *cobra.Command {
 
 func releaseVersion(version string) string {
 	if version == "" || version == "devel" || version == "(devel)" {
-		return "v0.1.0"
+		return generate.CurrentVersion
 	}
 	return version
 }

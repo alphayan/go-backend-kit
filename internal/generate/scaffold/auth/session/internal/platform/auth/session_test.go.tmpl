@@ -1,0 +1,25 @@
+package auth
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestSessionCookieAttributes(t *testing.T) {
+	response := httptest.NewRecorder()
+	SetSessionCookie(response, "token", true, time.Hour)
+	header := response.Header().Get("Set-Cookie")
+	for _, value := range []string{"__Host-session=token", "Path=/", "HttpOnly", "Secure", "SameSite=Lax", "Max-Age=3600"} {
+		if !strings.Contains(header, value) {
+			t.Errorf("cookie missing %q: %s", value, header)
+		}
+	}
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.AddCookie(&http.Cookie{Name: "__Host-session", Value: "token"})
+	if got := SessionToken(request, true); got != "token" {
+		t.Fatalf("SessionToken() = %q", got)
+	}
+}

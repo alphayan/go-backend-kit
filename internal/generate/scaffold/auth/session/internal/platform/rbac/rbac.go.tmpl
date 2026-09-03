@@ -1,0 +1,13 @@
+package rbac
+
+type PermissionSet map[string]struct{}
+type RolePermissions map[string]PermissionSet
+
+func (p RolePermissions) Allows(role, code string) bool {
+	permissions, ok := p[role]
+	if !ok {
+		return false
+	}
+	_, ok = permissions[code]
+	return ok
+}

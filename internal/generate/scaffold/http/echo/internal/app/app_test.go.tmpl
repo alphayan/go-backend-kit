@@ -10,12 +10,18 @@ import (
 	"time"
 
 	"{{.Module}}/internal/platform/config"
+{{if .Options.IsProduction}}	"{{.Module}}/internal/platform/observability"
+{{end}}
 {{if .Options.HasJWT}}	"encoding/base64"
 	"strings"
 
 	"{{.Module}}/internal/platform/auth"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+{{end}}{{if .Options.HasSession}}	"strings"
+
+	"{{.Module}}/internal/generated"
+	"{{.Module}}/internal/platform/auth"
 {{end}}{{if .Options.HasRedis}}	"github.com/redis/go-redis/v9"
 {{end}}{{if .Options.HasNATS}}	"github.com/nats-io/nats.go"
 {{end}}	"github.com/libtnb/sqlite"
@@ -29,15 +35,25 @@ func TestHealthDocsAndHTTPErrorEnvelope(t *testing.T) {
 		t.Fatal(err)
 	}
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	cfg := config.Config{RequestTimeout: 15 * time.Second}
+	cfg := config.Config{RequestTimeout: 15 * time.Second{{if .Options.HasSession}}, AuthSessionTTL: 24 * time.Hour, AuthSessionIdleTimeout: 2 * time.Hour, AuthLoginRateLimit: 5, AuthLoginRateWindow: 15 * time.Minute{{end}}}
+{{if .Options.IsProduction}}	metrics := observability.New(nil)
+{{end}}
 {{if .Options.HasJWT}}	secret := bytes32(t)
 	verifier, err := auth.NewVerifier(secret, "test-issuer", "test-audience", 30*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
+{{end}}{{if .Options.HasSession}}	if err := db.AutoMigrate(&auth.User{}, &auth.Session{}, &auth.AuditLog{}); err != nil {
+		t.Fatal(err)
+	}
+	authStore := auth.NewStore(db)
+	passwords, err := auth.NewPasswordManager(auth.DefaultPasswordParams(), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
 {{end}}{{if .Options.HasRedis}}	var redisClient *redis.Client
 {{end}}{{if .Options.HasNATS}}	var natsConn *nats.Conn
-{{end}}	e := New(cfg, db, logger{{if .Options.HasJWT}}, verifier{{end}}{{if .Options.HasRedis}}, redisClient{{end}}{{if .Options.HasNATS}}, natsConn{{end}})
+{{end}}	e := New(cfg, db, logger{{if .Options.IsProduction}}, metrics{{end}}{{if .Options.HasJWT}}, verifier{{end}}{{if .Options.HasSession}}, authStore, passwords{{end}}{{if .Options.HasRedis}}, redisClient{{end}}{{if .Options.HasNATS}}, natsConn{{end}})
 
 	live := request(e, "/health/live", nil)
 	if live.Code != http.StatusOK {
@@ -46,7 +62,10 @@ func TestHealthDocsAndHTTPErrorEnvelope(t *testing.T) {
 	if live.Header().Get("X-Request-ID") == "" || live.Header().Get("X-Content-Type-Options") != "nosniff" {
 		t.Fatalf("middleware headers = %#v", live.Header())
 	}
-	if response := request(e, "/openapi.json", nil); response.Code != http.StatusOK {
+{{if .Options.IsProduction}}	if response := request(e, "/metrics", nil); response.Code != http.StatusOK {
+		t.Fatalf("metrics status = %d, body = %s", response.Code, response.Body.String())
+	}
+{{end}}	if response := request(e, "/openapi.json", nil); response.Code != http.StatusOK {
 		t.Fatalf("openapi status = %d", response.Code)
 	}
 	if response := request(e, "/docs", nil); response.Code != http.StatusOK {
@@ -91,8 +110,46 @@ func TestHealthDocsAndHTTPErrorEnvelope(t *testing.T) {
 	if authed.Code != http.StatusNotFound {
 		t.Fatalf("authenticated missing route status = %d, body = %s", authed.Code, authed.Body.String())
 	}
+{{end}}{{if .Options.HasSession}}
+	admin := request(e, "/admin/", nil)
+	if admin.Code != http.StatusOK || !isAdminShell(admin.Body.String()) {
+		t.Fatalf("admin shell status = %d, body = %s", admin.Code, admin.Body.String())
+	}
+	adminRoute := request(e, "/admin/resources/product", nil)
+	if adminRoute.Code != http.StatusOK || !isAdminShell(adminRoute.Body.String()) {
+		t.Fatalf("admin SPA fallback status = %d, body = %s", adminRoute.Code, adminRoute.Body.String())
+	}
+	for route := range generated.RoutePermissions {
+		if !strings.HasPrefix(route, http.MethodGet+" ") {
+			continue
+		}
+		path := strings.TrimPrefix(route, http.MethodGet+" ")
+		path = strings.ReplaceAll(path, ":id", "1")
+		unauth := request(e, path, nil)
+		if unauth.Code != http.StatusUnauthorized {
+			t.Fatalf("registered session route %s status = %d, body = %s", path, unauth.Code, unauth.Body.String())
+		}
+		if unauth.Header().Get("WWW-Authenticate") != "" {
+			t.Fatalf("session 401 emitted WWW-Authenticate = %q", unauth.Header().Get("WWW-Authenticate"))
+		}
+		break
+	}
+	crossSite := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(`{"email":"admin@example.com","password":"secret"}`))
+	crossSite.Header.Set("Content-Type", "application/json")
+	crossSite.Header.Set("Sec-Fetch-Site", "cross-site")
+	crossResponse := httptest.NewRecorder()
+	e.ServeHTTP(crossResponse, crossSite)
+	if crossResponse.Code != http.StatusForbidden {
+		t.Fatalf("cross-site login status = %d, body = %s", crossResponse.Code, crossResponse.Body.String())
+	}
 {{end}}
 }
+
+{{if .Options.HasSession}}func isAdminShell(body string) bool {
+	return strings.Contains(body, "Frontend build required") || strings.Contains(body, `<div id="app"></div>`)
+}
+
+{{end}}
 
 func request(handler http.Handler, path string, headers map[string]string) *httptest.ResponseRecorder {
 	recorder := httptest.NewRecorder()

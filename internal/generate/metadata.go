@@ -24,6 +24,7 @@ type projectMetadata struct {
 }
 
 func encodeProjectMetadata(version string, opts ProjectOptions) ([]byte, error) {
+	opts = opts.normalized()
 	if err := opts.Validate(); err != nil {
 		return nil, err
 	}
@@ -32,7 +33,7 @@ func encodeProjectMetadata(version string, opts ProjectOptions) ([]byte, error) 
 		return nil, err
 	}
 	if version == "" {
-		version = "v0.1.0"
+		version = CurrentVersion
 	}
 	return marshalJSON(projectMetadata{
 		GeneratedBy:      projectMetadataOwner,
@@ -59,10 +60,18 @@ func parseProjectMetadata(data []byte) (projectMetadata, error) {
 	if meta.SchemaVersion != projectMetadataSchemaVersion {
 		return projectMetadata{}, fmt.Errorf("project metadata schema_version is %d, want %d; create a new project to change providers", meta.SchemaVersion, projectMetadataSchemaVersion)
 	}
+	legacyProfile := meta.Selection.Profile == ""
 	if err := meta.Selection.Validate(); err != nil {
 		return projectMetadata{}, fmt.Errorf("project metadata selection: %w; create a new project to change providers", err)
 	}
-	want, err := meta.Selection.Fingerprint()
+	var want string
+	var err error
+	if legacyProfile {
+		want, err = meta.Selection.legacyFingerprint()
+		meta.Selection.Profile = ProfilePersonal
+	} else {
+		want, err = meta.Selection.Fingerprint()
+	}
 	if err != nil {
 		return projectMetadata{}, err
 	}

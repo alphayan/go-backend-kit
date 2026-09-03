@@ -4,6 +4,8 @@ env "local" {
 
   migration {
     dir = "file://migrations"
+{{if and .Options.IsPostgres .Options.IsProduction}}    revisions_schema = "atlas_schema_revisions"
+{{end}}
   }
 }
 
@@ -14,5 +16,7 @@ env "ci" {
 
   migration {
     dir = "file://migrations"
+{{if and .Options.IsPostgres .Options.IsProduction}}    revisions_schema = "atlas_schema_revisions"
+{{end}}
   }
 }

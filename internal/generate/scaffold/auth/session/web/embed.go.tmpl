@@ -1,0 +1,54 @@
+// Package web serves the embedded admin single-page application.
+package web
+
+import (
+	"bytes"
+	"embed"
+	"errors"
+	"io/fs"
+	"net/http"
+	"path"
+	"strings"
+	"time"
+)
+
+//go:embed all:dist fallback.html
+var embedded embed.FS
+
+func Handler() http.Handler {
+	assets, err := fs.Sub(embedded, "dist")
+	if err != nil {
+		panic("web: invalid embedded assets: " + err.Error())
+	}
+	files := http.FileServer(http.FS(assets))
+	fallback, err := embedded.ReadFile("fallback.html")
+	if err != nil {
+		panic("web: invalid fallback asset: " + err.Error())
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+		if name != "" && name != "." {
+			if info, statErr := fs.Stat(assets, name); statErr == nil && !info.IsDir() {
+				if strings.HasPrefix(name, "assets/") {
+					w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+				}
+				files.ServeHTTP(w, r)
+				return
+			} else if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
+				http.Error(w, "frontend unavailable", http.StatusInternalServerError)
+				return
+			}
+		}
+		w.Header().Set("Cache-Control", "no-cache")
+		if _, statErr := fs.Stat(assets, "index.html"); errors.Is(statErr, fs.ErrNotExist) {
+			http.ServeContent(w, r, "index.html", time.Time{}, bytes.NewReader(fallback))
+			return
+		} else if statErr != nil {
+			http.Error(w, "frontend unavailable", http.StatusInternalServerError)
+			return
+		}
+		request := r.Clone(r.Context())
+		request.URL.Path = "/"
+		files.ServeHTTP(w, request)
+	})
+}

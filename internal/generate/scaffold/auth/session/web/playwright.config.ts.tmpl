@@ -1,0 +1,31 @@
+import { defineConfig } from "@playwright/test"
+import { fileURLToPath } from "node:url"
+
+// This suite creates users and changes passwords. Never point it at real data.
+if (process.env.E2E_DISPOSABLE_DATABASE !== "1") throw new Error("Use a migrated disposable database and set E2E_DISPOSABLE_DATABASE=1")
+const port = Number(process.env.E2E_PORT ?? "4187")
+if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("Invalid E2E_PORT")
+const baseURL = `http://127.0.0.1:${port}`
+
+export default defineConfig({
+  testDir: "./e2e",
+  workers: 1,
+  retries: 0,
+  timeout: 60_000,
+  use: { baseURL, trace: "retain-on-failure", screenshot: "only-on-failure" },
+  webServer: {
+    command: "go run ./cmd/api",
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
+    url: `${baseURL}/health/ready`,
+    reuseExistingServer: false,
+    timeout: 120_000,
+    gracefulShutdown: { signal: "SIGTERM", timeout: 15_000 },
+    env: {
+      HTTP_ADDRESS: `127.0.0.1:${port}`,
+      AUTH_BOOTSTRAP_EMAIL: "browser-admin@example.test",
+      AUTH_BOOTSTRAP_PASSWORD: "browser test initial password",
+      AUTH_LOGIN_RATE_LIMIT: "100",
+      AUTH_AUDIT_RETENTION_DAYS: "0",
+    },
+  },
+})

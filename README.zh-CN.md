@@ -1,20 +1,24 @@
 # go-backend-kit
 
-`go-backend-kit` 是一个确定性 Go 后台脚手架：用严格 YAML 定义资源，即可生成五接口 CRUD、版本化迁移、OpenAPI 3.1、内嵌 Swagger UI 和契约测试。
+`go-backend-kit` 是一个确定性 Go 后台脚手架：用严格 YAML 定义资源，即可生成五接口 CRUD、版本化迁移、OpenAPI 3.1、内嵌 Swagger UI 和契约测试。Session 项目还会生成由 Go 二进制内嵌提供的 Vue 管理端。
 
-默认 `gobackend new` 选择是 Echo + SQLite + slog，不包含 Redis、NATS 或 JWT。PostgreSQL、Fiber、Redis、NATS、zap/zerolog 以及 JWT 校验在创建项目时按需选择。Provider 在生成期静态编入；生成的二进制没有插件注册表或 DI 容器。
+默认 `gobackend new` 选择是 Echo + SQLite + slog，不包含 Redis、NATS 或认证。PostgreSQL、Fiber、Redis、NATS、zap/zerolog、JWT 校验以及 Echo 数据库 Session 在创建项目时按需选择。Provider 在生成期静态编入；生成的二进制没有插件注册表或 DI 容器。
 
 [English](README.md)
 
+默认档是刻意保持轻量的个人档：Echo + SQLite + slog，不包含 Redis、NATS、认证或运维栈。PostgreSQL、Fiber、Redis、NATS、其他日志后端、JWT 校验、Echo 数据库 Session 和生产档都在创建项目时按需选择。
+
 ## 环境要求
 
-- Go 1.26.5 或更高版本；生成项目固定 `go 1.26.5`
+- Go 1.27.1 或更高版本；生成项目固定 `go 1.27.1`
+- Session 前端开发需要 Node.js 24.20.0 LTS 和 pnpm 11.25.0；生成项目会固定两个版本，但生产运行时不依赖它们。
 - 默认 SQLite 项目运行应用不需要 Docker。选择 PostgreSQL、Redis、NATS 或执行 Atlas 迁移时需要 Docker。
+- 生产档还会使用 Docker 启动本地应用、Prometheus 和 Grafana。
 
 ## 快速开始
 
 ```bash
-go install github.com/alphayan/go-backend-kit/cmd/gobackend@v0.1.0
+go install github.com/alphayan/go-backend-kit/cmd/gobackend@v0.2.0
 gobackend new product-api --module github.com/yourname/product-api
 cd product-api
 ```
@@ -23,11 +27,12 @@ cd product-api
 
 ```text
 --http echo|fiber           (默认 echo)
---database sqlite|postgres  (默认 sqlite)
+--database sqlite|postgres  (个人档默认 sqlite；生产档默认 postgres)
 --cache none|redis          (默认 none)
 --messaging none|nats       (默认 none)
 --logging slog|zap|zerolog  (默认 slog)
---auth none|jwt             (默认 none)
+--auth none|jwt|session     (默认 none；session 仅支持 Echo)
+--profile personal|production (默认 personal)
 ```
 
 创建 `product.yaml`：
@@ -68,10 +73,26 @@ make run
 
 访问 `http://localhost:8080/docs`。
 
+## 可选生产档
+
+只有在项目需要更完整的本地运维闭环时才选择这个档：
+
+    gobackend new product-api --module github.com/yourname/product-api --profile production
+    cd product-api
+    cp .env.example .env
+    cp .env.postgres.example .env.postgres
+    chmod 600 .env .env.postgres
+    # 按生成项目 docs/postgres-operations.md 填写凭据、初始化数据库并应用迁移
+    make up
+
+它会增加固定版本的应用 Dockerfile、Compose 一键启动、容器健康检查、可配置的 JSON 日志级别和服务元数据、Prometheus 指标/告警以及基础 Grafana 看板。日常可使用 make logs、make down、make compose-config。当前刻意不生成 Kubernetes 清单，也不生成 CI 镜像发布/部署任务。
+
+生产档未显式指定数据库时使用 PostgreSQL；刻意单进程项目仍可显式选择 `--database sqlite`。生产 PostgreSQL 会分离初始化、迁移和运行角色，将数据库管理秘密与 API 环境分开，并提供原生备份/新库恢复脚本；已有卷不会自动改造。异地备份目标、实际切换和 TLS 部署需要单独配置验证。
+
 ## 命令
 
 ```text
-gobackend new <dir> --module <module-path> [--http echo|fiber] [--database sqlite|postgres] [--cache none|redis] [--messaging none|nats] [--logging slog|zap|zerolog] [--auth none|jwt]
+gobackend new <dir> --module <module-path> [--http echo|fiber] [--database sqlite|postgres] [--cache none|redis] [--messaging none|nats] [--logging slog|zap|zerolog] [--auth none|jwt|session] [--profile personal|production]
 go tool gobackend add <resource.yaml>
 go tool gobackend generate
 go tool gobackend check
@@ -118,19 +139,52 @@ PostgreSQL 连接池默认最多 25 个连接、25 个空闲连接，连接最�
 
 生产启动绝不调用 `AutoMigrate`。SQLite 的 `AutoMigrate` 只用于本地契约快测；CI 先把经过审查的 Atlas SQL 迁移应用到 PostgreSQL，再复跑相同契约。
 
+个人档保持生成运行时轻量。生产档额外提供 /metrics，记录 HTTP 请求量/耗时/并发数和数据库连接池指标，并在本地预置 Prometheus 与 Grafana。profile 在创建项目后不可就地切换。
+
+## 升级已生成的项目
+
+在项目目录中运行新版 `gobackend upgrade` 默认只预览，`gobackend upgrade --apply` 才应用。新项目的 `.gobackend-scaffold.json` 记录原始脚手架摘要，应提交到版本控制；普通 `generate` 不会刷新它或接管用户修改。`add` 引发的模块整理只刷新整理前仍匹配原始摘要的 `go.mod`／`go.sum`。
+
+没有该基线的旧项目必须提供 `--baseline /absolute/pristine-old-project`：用原始版本生成器、相同 module/provider 和资源定义重建并核验的原始项目，或可靠的原始快照。不要把当前已修改项目或新版候选目录当作旧基线。升级要求已有生成文件清单，不会猜测文件归属；不支持就地切换 provider/profile。
+
+预览会下载所需 Go 模块，并在 gitignore 的 `.gobackend/upgrade-*` 中留下 `candidate/` 与 `plan.json`；不写业务源文件。应用前将所有被替换/删除的原文件连同权限备份到该目录的 `before/`。用户与上游同时改过的文件会阻止整批应用；手工对照候选文件合并后，用 `--keep internal/app/app.go` 等精确路径确认保留合并结果并推进其上游基线。`--keep` 只接受脚手架路径，不接受生成文件、`.env`、迁移或资源定义。自定义依赖同样需要人工合并 `go.mod`／`go.sum`，不能直接保留旧版本依赖后声称升级完成。
+
+应用使用项目锁、写前校验和逐文件替换；可观察写入失败会回滚已写文件，不覆盖回滚期间出现的新修改。它不是整个目录的原子事务：断电/强制退出时须根据 `plan.json` 和 `before/` 核验恢复或重跑；新增文件没有旧备份，人工回退前核对候选内容再删除。不要在应用期间编辑、运行其他生成器或部署该目录。保留恢复目录至验收结束，再按精确路径清理。升级不会读取真实 `.env`、执行数据库迁移、Git 提交或部署。
+
+升级后执行 `go mod tidy`、`go tool gobackend generate`、`go tool gobackend check`、`go test -race ./...`、`go vet ./...` 和 `go tool govulncheck ./...`；Session 项目还需冻结 pnpm 安装、前端构建/浏览器测试。数据库变更仍需单独审查迁移并验证恢复，不能用代码升级代替生产切换。
+
+## Session 认证选项
+
+`--auth session` 是仅限 Echo 的数据库登录套件，包含可撤销 HttpOnly Cookie、Argon2id 密码、固定 `admin`/`viewer` RBAC、全局标准库跨源保护、有界登录/KDF 限流和尽力写入的审计日志。它新增 `POST /auth/login`、`POST /auth/logout`、`GET /auth/me`、`POST /auth/password`，并为资源生成路由权限表和内嵌 Vue 管理端。
+
+Session 项目会把 `auth_users`、`auth_sessions`、`auth_audit_logs` 模型加入 Atlas 目标 schema；PostgreSQL 还包含共享限流表 `auth_rate_limits`。不会附带手写认证表 SQL，也不会在运行时调用 `AutoMigrate`。启动前必须显式生成、审查并应用迁移。空用户表要求成对设置引导邮箱和密码。生产必须使用 `__Host-session` Secure Cookie、TLS 和 HSTS。PostgreSQL 的 IP／邮箱额度由数据库短事务跨实例共享；SQLite 限流仅适用于单进程。可信代理还必须正确配置 Echo 的 IP 提取。审计在业务提交后写入，因此进程在窄窗口崩溃可能丢失该事件。
+
+管理端位于 `/admin/`，按资源生成带 Zod 校验的类型化表单、搜索/筛选/排序表格和分页，并支持管理员增删改、viewer 只读、登录/注销、密码修改、亮色/暗色/跟随系统主题、响应式布局和可访问对话框。可运行 `make frontend-install`、`make frontend-typecheck`、`make frontend-test`、`make frontend-build`；`make frontend-dev` 通过同源代理启动 Vite。生产 Docker 构建会先编译前端，再由 Go 二进制内嵌 `web/dist`，运行镜像不包含 Node.js 或 pnpm。
+
 ## 测试
+
+Session 管理端还包含仅管理员可见的用户管理和审计查询：创建账号、调整角色归属、禁用/启用、会话列表与撤销、分页审计筛选。禁止修改自身角色/状态，修改他人访问权限会撤销其会话。审计保留期由 `AUTH_AUDIT_RETENTION_DAYS` 明确开启（默认 `0`，不自动删除）。
 
 ```bash
 go test -race ./...
 go vet ./...
 go tool govulncheck ./...
+./scripts/frontend-e2e.sh
 ```
 
 端到端测试会执行新建项目、添加多个资源、重新生成、漂移检查、所有字段类型编译和五接口契约。
 
+Session 生成项目包含串行/并行口令基准 `BenchmarkPassword`。可复现命令、十次重复样本、内存分配和本机 RSS 边界见 [口令基准记录](docs/password-benchmark-2026-09-04.md)；不将微基准视为生产登录延迟或安全强弱证明。
+
+`scripts/frontend-e2e.sh` 需要 Docker 执行显式 SQLite 迁移，并安装固定版本 Chromium。除冻结锁文件、类型检查、辅助函数单测、构建/嵌入检查外，还会实际操作浏览器验证登录、用户/会话管理、审计筛选、密码修改、资源 CRUD/搜索/筛选/分页和 viewer 权限。数据仅位于临时生成项目中；失败时保留目录供排查。
+
+`scripts/frontend-e2e.sh production` 生成生产档、显式选择 SQLite 作为隔离测试库，并增加仅测试用的 Go 标准库 TLS 代理。Chromium 的 `.test` 域名只在该浏览器进程映射到回环地址；验证 HTTP 拒收 Secure Cookie、HTTPS 接受 `__Host-session`/HttpOnly/Path/SameSite 属性、同源资源写入、跨站表单 POST 拒绝和 Lax 顶层 GET 放行，以及轮换/注销后的旧 Cookie 重放拒绝。代理单测验证转发头防伪并保留原始 Host/Origin/Cookie。默认使用 4187–4189 端口（可通过 `E2E_PORT` 选连续三个端口），测试关闭自有服务，绝不复用已有服务。
+
+该代理只复制进临时项目，不是生产部署产物；浏览器仅在测试上下文忽略 httptest 自签名证书错误，不修改系统信任库。HSTS 检查仅证明代理响应头，不证明真实证书签发/续期或浏览器持久化强制升级。实际域名、反代 IP 信任配置、生产容量和异地备份仍需独立验收；PostgreSQL 迁移与共享限流使用各自的集成测试，不由这套 SQLite TLS 测试代替。
+
 ## 当前不包含
 
-已创建项目中更换 provider、第二种 ORM、密码登录、刷新令牌、RBAC、软删除、关联建模、MySQL、自动 CRUD 缓存、NATS/JetStream 拓扑、文件上传和管理端前端。
+已创建项目中更换 provider、第二种 ORM、刷新令牌、可在线编辑的角色定义、密码重置/MFA/SSO、软删除、关联建模、MySQL、自动 CRUD 缓存、NATS/JetStream 拓扑和文件上传。
 
 ## License
 

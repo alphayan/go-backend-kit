@@ -23,9 +23,9 @@ func WriteError(c *echo.Context, err error) error {
 		}
 		public = &apperror.Error{Status: status, Code: code, Message: message}
 	}
-	if public.Status == http.StatusUnauthorized {
+{{if not .Options.HasSession}}	if public.Status == http.StatusUnauthorized {
 		c.Response().Header().Set("WWW-Authenticate", "Bearer")
-	}
+	}{{end}}
 	requestID := c.Response().Header().Get("X-Request-ID")
 	if requestID == "" {
 		requestID = c.Request().Header.Get("X-Request-ID")

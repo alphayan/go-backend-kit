@@ -1,0 +1,36 @@
+import { computed, readonly, ref } from "vue"
+
+export type ThemePreference = "system" | "light" | "dark"
+export type ResolvedTheme = "light" | "dark"
+
+const colorScheme = matchMedia("(prefers-color-scheme: dark)")
+const stored = localStorage.getItem("admin-theme")
+const initial: ThemePreference = stored === "light" || stored === "dark" || stored === "system"
+  ? stored
+  : "system"
+const theme = ref<ThemePreference>(initial)
+const resolvedTheme = computed<ResolvedTheme>(() => theme.value === "system" ? systemTheme() : theme.value)
+applyTheme(resolvedTheme.value)
+colorScheme.addEventListener("change", () => {
+  if (theme.value === "system") applyTheme(systemTheme())
+})
+
+export function useTheme() {
+  return {
+    theme: readonly(theme),
+    resolvedTheme,
+    cycle() {
+      theme.value = theme.value === "system" ? "light" : theme.value === "light" ? "dark" : "system"
+      localStorage.setItem("admin-theme", theme.value)
+      applyTheme(resolvedTheme.value)
+    },
+  }
+}
+
+function systemTheme(): ResolvedTheme {
+  return colorScheme.matches ? "dark" : "light"
+}
+
+function applyTheme(value: ResolvedTheme) {
+  document.documentElement.dataset.theme = value
+}

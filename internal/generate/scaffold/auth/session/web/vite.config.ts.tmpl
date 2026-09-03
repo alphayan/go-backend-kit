@@ -1,0 +1,48 @@
+import { fileURLToPath, URL } from "node:url"
+import { rm } from "node:fs/promises"
+import vue from "@vitejs/plugin-vue"
+import { defineConfig } from "vite"
+
+const apiTarget = process.env.VITE_API_TARGET ?? "http://127.0.0.1:8080"
+
+export default defineConfig({
+  root: fileURLToPath(new URL(".", import.meta.url)),
+  base: "/admin/",
+  plugins: [
+    vue(),
+    {
+      name: "clean-admin-output",
+      async buildStart() {
+        await Promise.all([
+          rm(new URL("./dist/assets", import.meta.url), { recursive: true, force: true }),
+          rm(new URL("./dist/index.html", import.meta.url), { force: true }),
+        ])
+      },
+    },
+  ],
+  resolve: {
+    alias: {
+      "@": fileURLToPath(new URL("./src", import.meta.url)),
+    },
+  },
+  server: {
+    host: "127.0.0.1",
+    port: 5173,
+    strictPort: true,
+    proxy: Object.fromEntries(
+      ["/api", "/auth", "/health", "/openapi.json"].map((prefix) => [
+        prefix,
+        {
+          target: apiTarget,
+          changeOrigin: true,
+          headers: { Origin: apiTarget },
+        },
+      ]),
+    ),
+  },
+  build: {
+    outDir: "dist",
+    emptyOutDir: false,
+    sourcemap: false,
+  },
+})

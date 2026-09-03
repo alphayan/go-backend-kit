@@ -1,0 +1,97 @@
+package audit
+
+import (
+	"context"
+	"log/slog"
+	"time"
+
+	"{{.Module}}/internal/platform/auth"
+	"gorm.io/gorm"
+)
+
+type Event struct {
+	ActorID    *int64
+	Action     string
+	Resource   string
+	ResourceID string
+	Outcome    string
+	RequestID  string
+	CreatedAt  time.Time
+}
+
+type Store struct {
+	db     *gorm.DB
+	logger *slog.Logger
+}
+
+func NewStore(db *gorm.DB, logger *slog.Logger) *Store {
+	return &Store{db: db, logger: logger}
+}
+
+func (s *Store) Write(ctx context.Context, event Event) error {
+	createdAt := event.CreatedAt.UTC()
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+	return s.db.WithContext(ctx).Create(&auth.AuditLog{
+		ActorID: event.ActorID, Action: event.Action, Resource: event.Resource,
+		ResourceID: event.ResourceID, Outcome: event.Outcome, RequestID: event.RequestID,
+		CreatedAt: createdAt,
+	}).Error
+}
+
+func (s *Store) BestEffort(ctx context.Context, event Event) {
+	if err := s.Write(ctx, event); err != nil {
+		s.logger.ErrorContext(ctx, "audit write failed", "error", err, "action", event.Action, "resource", event.Resource)
+	}
+}
+
+type Filter struct {
+	ActorID *int64
+	Action, Resource, Outcome string
+	From, To time.Time
+}
+
+func (s *Store) List(ctx context.Context, filter Filter, page, size int) ([]auth.AuditLog, int64, error) {
+	query := s.db.WithContext(ctx).Model(&auth.AuditLog{})
+	if filter.ActorID != nil { query = query.Where("actor_id = ?", *filter.ActorID) }
+	if filter.Action != "" { query = query.Where("action = ?", filter.Action) }
+	if filter.Resource != "" { query = query.Where("resource = ?", filter.Resource) }
+	if filter.Outcome != "" { query = query.Where("outcome = ?", filter.Outcome) }
+	if !filter.From.IsZero() { query = query.Where("created_at >= ?", filter.From) }
+	if !filter.To.IsZero() { query = query.Where("created_at < ?", filter.To) }
+	var total int64
+	if err := query.Count(&total).Error; err != nil { return nil, 0, err }
+	var rows []auth.AuditLog
+	err := query.Order("id DESC").Offset((page-1)*size).Limit(size).Find(&rows).Error
+	return rows, total, err
+}
+
+// Prune deletes one bounded batch. The caller explicitly opts into retention.
+func (s *Store) Prune(ctx context.Context, cutoff time.Time) (int64, error) {
+	ids := s.db.WithContext(ctx).Model(&auth.AuditLog{}).Select("id").Where("created_at < ?", cutoff).Order("id").Limit(1000)
+	result := s.db.WithContext(ctx).Where("id IN (?)", ids).Delete(&auth.AuditLog{})
+	return result.RowsAffected, result.Error
+}
+
+func (s *Store) SweepRetention(ctx context.Context, days int) {
+	if days <= 0 { return }
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done(): return
+		case now := <-ticker.C:
+			cutoff := now.UTC().AddDate(0, 0, -days)
+			// ponytail: cap each hourly sweep at 100k rows; archive/partition if that is insufficient.
+			for range 100 {
+				count, err := s.Prune(ctx, cutoff)
+				if err != nil {
+					if ctx.Err() == nil { s.logger.ErrorContext(ctx, "audit retention failed", "error", err) }
+					break
+				}
+				if count < 1000 { break }
+			}
+		}
+	}
+}

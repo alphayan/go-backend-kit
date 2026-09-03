@@ -66,3 +66,31 @@ func TestGeneratedManifestRejectsPlatformSpecificTraversal(t *testing.T) {
 		}
 	}
 }
+
+func TestInstallRemovesUnchangedSessionPermissionsWhenNoLongerDesired(t *testing.T) {
+	root := t.TempDir()
+	name := "internal/generated/permissions_gen.go"
+	previous := map[string][]byte{name: []byte("// " + generatedMarker + "\n\npackage generated\n")}
+	if err := addGeneratedManifest(previous); err != nil {
+		t.Fatal(err)
+	}
+	for path, data := range previous {
+		target := filepath.Join(root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	desired := map[string][]byte{"internal/generated/register_gen.go": []byte("// " + generatedMarker + "\n\npackage generated\n")}
+	if err := addGeneratedManifest(desired); err != nil {
+		t.Fatal(err)
+	}
+	if err := installGenerated(root, desired); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(name))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale session permissions still exist: %v", err)
+	}
+}

@@ -28,7 +28,15 @@ func Validation(details any) *Error {
 func Unauthorized() *Error {
 	return &Error{Status: http.StatusUnauthorized, Code: "unauthorized", Message: "authentication required"}
 }
+{{if .Options.HasSession}}
+func Forbidden() *Error {
+	return &Error{Status: http.StatusForbidden, Code: "forbidden", Message: "permission denied"}
+}
 
+func TooManyRequests() *Error {
+	return &Error{Status: http.StatusTooManyRequests, Code: "too_many_requests", Message: "too many requests"}
+}
+{{end}}
 func FromDatabase(err error) error {
 	if err == nil {
 		return nil

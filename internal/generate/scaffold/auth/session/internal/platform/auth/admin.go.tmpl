@@ -1,0 +1,106 @@
+package auth
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+var (
+	ErrAdminRequired = errors.New("administrator required")
+	ErrSelfUpdate = errors.New("cannot change your own role or status")
+	ErrInvalidRole = errors.New("role must be admin or viewer")
+	ErrEmailConflict = errors.New("email already exists")
+)
+
+func (s *Store) ListUsers(ctx context.Context, email string, page, size int) ([]User, int64, error) {
+	query := s.db.WithContext(ctx).Model(&User{})
+	if email != "" { query = query.Where("email = ?", normalizeEmail(email)) }
+	var total int64
+	if err := query.Count(&total).Error; err != nil { return nil, 0, err }
+	var users []User
+	err := query.Omit("password_hash").Order("id").Offset((page-1)*size).Limit(size).Find(&users).Error
+	return users, total, err
+}
+
+// Lock actor and target in the same order, then recheck authority inside the
+// transaction. Concurrent admins cannot demote/disable each other using stale roles.
+func (s *Store) withAdmin(ctx context.Context, actorID, targetID int64, change func(*gorm.DB) error) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var users []User
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id IN ?", []int64{actorID, targetID}).Order("id").Find(&users).Error; err != nil { return err }
+		allowed, found := false, targetID == 0
+		for _, user := range users {
+			if user.ID == actorID { allowed = user.Role == "admin" && user.DisabledAt == nil }
+			if user.ID == targetID { found = true }
+		}
+		if !allowed { return ErrAdminRequired }
+		if !found { return ErrUserNotFound }
+		return change(tx)
+	})
+}
+
+func (s *Store) AdminCreateUser(ctx context.Context, actorID int64, email, passwordHash, role string) (User, error) {
+	if role != "admin" && role != "viewer" { return User{}, ErrInvalidRole }
+	user := User{Email: normalizeEmail(email), PasswordHash: passwordHash, Role: role}
+	err := s.withAdmin(ctx, actorID, 0, func(tx *gorm.DB) error {
+		result := tx.Clauses(clause.OnConflict{Columns: []clause.Column{ {Name: "email"} }, DoNothing: true}).Create(&user)
+		if result.Error != nil { return result.Error }
+		if result.RowsAffected == 0 { return ErrEmailConflict }
+		return nil
+	})
+	return user, err
+}
+
+func (s *Store) AdminUpdateUser(ctx context.Context, actorID, userID int64, role *string, disabled *bool, now time.Time) (User, error) {
+	if actorID == userID { return User{}, ErrSelfUpdate }
+	if role != nil && *role != "admin" && *role != "viewer" { return User{}, ErrInvalidRole }
+	var user User
+	err := s.withAdmin(ctx, actorID, userID, func(tx *gorm.DB) error {
+		changes := map[string]any{}
+		if role != nil { changes["role"] = *role }
+		if disabled != nil {
+			changes["disabled_at"] = nil
+			if *disabled { changes["disabled_at"] = now.UTC() }
+		}
+		if len(changes) == 0 { return errors.New("no user changes") }
+		if err := tx.Model(&User{}).Where("id = ?", userID).Updates(changes).Error; err != nil { return err }
+		if err := tx.Where("user_id = ?", userID).Delete(&Session{}).Error; err != nil { return err }
+		return tx.Take(&user, userID).Error
+	})
+	return user, err
+}
+
+// SessionInfo deliberately excludes the token digest and user/password models.
+type SessionInfo struct {
+	ID int64 `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+	LastSeenAt time.Time `json:"last_seen_at"`
+	UserAgent string `json:"user_agent"`
+	IP string `json:"ip"`
+}
+
+func (s *Store) ListUserSessions(ctx context.Context, userID int64, now time.Time, idle time.Duration, page, size int) ([]SessionInfo, int64, error) {
+	if _, err := s.FindUserByID(ctx, userID); err != nil { return nil, 0, err }
+	query := s.db.WithContext(ctx).Model(&Session{}).Where("user_id = ? AND expires_at > ? AND last_seen_at > ?", userID, now, now.Add(-idle))
+	var total int64
+	if err := query.Count(&total).Error; err != nil { return nil, 0, err }
+	var sessions []SessionInfo
+	err := query.Select("id", "created_at", "expires_at", "last_seen_at", "user_agent", "ip").Order("id DESC").Offset((page-1)*size).Limit(size).Scan(&sessions).Error
+	return sessions, total, err
+}
+
+func (s *Store) AdminRevokeSessions(ctx context.Context, actorID, userID, sessionID int64) error {
+	return s.withAdmin(ctx, actorID, userID, func(tx *gorm.DB) error {
+		query := tx.Where("user_id = ?", userID)
+		if sessionID != 0 { query = query.Where("id = ?", sessionID) }
+		result := query.Delete(&Session{})
+		if result.Error != nil { return result.Error }
+		if sessionID != 0 && result.RowsAffected == 0 { return ErrSessionNotFound }
+		return nil
+	})
+}

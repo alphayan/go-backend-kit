@@ -1,0 +1,96 @@
+<script setup lang="ts">
+import { reactive, ref, watch } from "vue"
+import { APIError, messageFor } from "@/lib/api"
+import { buildPayload, initialValues, zodDetails, type FormValues } from "@/lib/forms"
+import type { ResourceDefinition, ResourceRecord } from "@/lib/resource"
+import FieldInput from "./FieldInput.vue"
+
+const props = defineProps<{
+  resource: ResourceDefinition
+  mode: "create" | "update"
+  record?: ResourceRecord
+  busy?: boolean
+  serverError?: unknown
+}>()
+const emit = defineEmits<{ submit: [payload: Record<string, unknown>]; cancel: [] }>()
+
+const values = reactive<FormValues>({})
+const nullFields = reactive(new Set<string>())
+const touched = reactive(new Set<string>())
+const errors = ref<Record<string, string>>({})
+const formError = ref("")
+
+watch(() => [props.resource, props.record, props.mode] as const, reset, { immediate: true })
+watch(() => props.serverError, (error) => {
+  if (error instanceof APIError) errors.value = { ...errors.value, ...error.details }
+  formError.value = error === undefined ? "" : messageFor(error)
+})
+
+function reset() {
+  for (const key of Object.keys(values)) delete values[key]
+  Object.assign(values, initialValues(props.resource.fields, props.record))
+  nullFields.clear()
+  if (props.record !== undefined) {
+    for (const field of props.resource.fields) {
+      if (field.nullable && props.record[field.name] === null) nullFields.add(field.name)
+    }
+  }
+  touched.clear()
+  errors.value = {}
+  formError.value = ""
+}
+
+function submit() {
+  errors.value = {}
+  formError.value = ""
+  let payload: Record<string, unknown>
+  try {
+    payload = buildPayload(props.resource.fields, values, nullFields, touched, props.mode)
+  } catch {
+    errors.value = { form: "One or more fields could not be parsed. Check JSON and date values." }
+    formError.value = errors.value.form ?? "Invalid form"
+    return
+  }
+  const schema = props.mode === "create" ? props.resource.createSchema : props.resource.updateSchema
+  const result = schema.safeParse(payload)
+  if (!result.success) {
+    errors.value = zodDetails(result.error)
+    return
+  }
+  if (props.mode === "update" && Object.keys(result.data).length === 0) {
+    formError.value = "Change at least one field before saving."
+    return
+  }
+  emit("submit", result.data)
+}
+</script>
+
+<template>
+  <form class="resource-form" novalidate @submit.prevent="submit">
+    <header class="form-header">
+      <div>
+        <p class="eyebrow" v-text="mode === 'create' ? 'New record' : `Record #${record?.id}`" />
+        <h2 v-text="`${mode === 'create' ? 'Create' : 'Edit'} ${resource.name}`" />
+      </div>
+      <button class="icon-button" type="button" aria-label="Close form" :disabled="busy" @click="emit('cancel')">×</button>
+    </header>
+    <div class="form-fields">
+      <FieldInput
+        v-for="field in resource.fields"
+        :key="field.name"
+        :field="field"
+        :model-value="values[field.name] ?? ''"
+        :is-null="nullFields.has(field.name)"
+        :error="errors[field.name]"
+        @update:model-value="values[field.name] = $event"
+        @update:is-null="$event ? nullFields.add(field.name) : nullFields.delete(field.name)"
+        @touched="touched.add(field.name)"
+      />
+      <p v-if="formError" class="form-error" role="alert" v-text="formError" />
+    </div>
+    <footer class="form-actions">
+      <button class="button secondary" type="button" :disabled="busy" @click="emit('cancel')">Cancel</button>
+      <button class="button primary" type="submit" :disabled="busy" v-text="busy ? 'Saving…' : 'Save record'" />
+    </footer>
+  </form>
+</template>

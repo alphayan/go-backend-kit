@@ -10,9 +10,14 @@ import (
 	"{{.Module}}/internal/generated"
 	"{{.Module}}/internal/platform/config"
 	"{{.Module}}/internal/platform/httpx"
+{{if .Options.IsProduction}}	"{{.Module}}/internal/platform/observability"
+{{end}}
 	"{{.Module}}/openapi"
 {{if .Options.HasJWT}}	"{{.Module}}/internal/platform/apperror"
 	"{{.Module}}/internal/platform/auth"
+{{end}}{{if .Options.HasSession}}	"{{.Module}}/internal/platform/audit"
+	"{{.Module}}/internal/platform/auth"
+	"{{.Module}}/web"
 {{end}}{{if .Options.HasRedis}}	"github.com/redis/go-redis/v9"
 {{end}}{{if .Options.HasNATS}}	"github.com/nats-io/nats.go"
 {{end}}	"github.com/labstack/echo/v5"
@@ -21,7 +26,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func New(cfg config.Config, db *gorm.DB, logger *slog.Logger{{if .Options.HasJWT}}, verifier *auth.Verifier{{end}}{{if .Options.HasRedis}}, redisClient *redis.Client{{end}}{{if .Options.HasNATS}}, natsConn *nats.Conn{{end}}) *echo.Echo {
+func New(cfg config.Config, db *gorm.DB, logger *slog.Logger{{if .Options.IsProduction}}, metrics *observability.Metrics{{end}}{{if .Options.HasJWT}}, verifier *auth.Verifier{{end}}{{if .Options.HasSession}}, authStore *auth.Store, passwords *auth.PasswordManager{{end}}{{if .Options.HasRedis}}, redisClient *redis.Client{{end}}{{if .Options.HasNATS}}, natsConn *nats.Conn{{end}}) *echo.Echo {
 	e := echo.NewWithConfig(echo.Config{Logger: logger})
 	e.HTTPErrorHandler = func(c *echo.Context, err error) { _ = httpx.WriteError(c, err) }
 	e.Use(middleware.RequestID())
@@ -32,7 +37,9 @@ func New(cfg config.Config, db *gorm.DB, logger *slog.Logger{{if .Options.HasJWT
 	if len(cfg.CORSOrigins) > 0 {
 		e.Use(middleware.CORS(cfg.CORSOrigins...))
 	}
-	e.Use(requestLogger(logger))
+	e.Use(requestLogger(logger{{if .Options.IsProduction}}, metrics{{end}}))
+{{if .Options.HasSession}}	e.Use(crossOriginMiddleware())
+{{end}}
 
 	e.GET("/health/live", func(c *echo.Context) error {
 		return httpx.WriteData(c, http.StatusOK, map[string]string{"status": "ok"})
@@ -60,30 +67,43 @@ func New(cfg config.Config, db *gorm.DB, logger *slog.Logger{{if .Options.HasJWT
 		}
 {{end}}		return httpx.WriteData(c, http.StatusOK, map[string]string{"status": "ready"})
 	})
-	e.GET("/openapi.json", func(c *echo.Context) error {
+{{if .Options.IsProduction}}	e.GET("/metrics", echo.WrapHandler(metrics.Handler()))
+{{end}}	e.GET("/openapi.json", func(c *echo.Context) error {
 		return c.JSONBlob(http.StatusOK, openapi.Spec)
 	})
 	docs := echo.WrapHandler(v5emb.New("Generated Backend API", "/openapi.json", "/docs"))
 	e.GET("/docs", docs)
 	e.GET("/docs/*", docs)
-	api := e.Group("/api/v1")
+{{if .Options.HasSession}}	audits := audit.NewStore(db, logger)
+	registerAuthRoutes(e, newAuthHandler(cfg, authStore, passwords, audits, logger))
+	e.GET("/admin", func(c *echo.Context) error { return c.Redirect(http.StatusPermanentRedirect, "/admin/") })
+	admin := echo.WrapHandler(http.StripPrefix("/admin/", web.Handler()))
+	e.GET("/admin/", admin)
+	e.GET("/admin/*", admin)
+{{end}}	api := e.Group("/api/v1")
 {{if .Options.HasJWT}}	api.Use(jwtMiddleware(verifier))
+{{end}}{{if .Options.HasSession}}	api.Use(sessionMiddleware(authStore, cfg), permissionMiddleware(audits), resourceAuditMiddleware(audits, logger))
 {{end}}	generated.Register(api, db)
 	return e
 }
 
-func requestLogger(logger *slog.Logger) echo.MiddlewareFunc {
+func requestLogger(logger *slog.Logger{{if .Options.IsProduction}}, metrics *observability.Metrics{{end}}) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
 			start := time.Now()
-			err := next(c)
+{{if .Options.IsProduction}}			metrics.BeginRequest()
+{{end}}			err := next(c)
 			_, status := echo.ResolveResponseStatus(c.Response(), err)
+			duration := time.Since(start)
+{{if .Options.IsProduction}}			metrics.ObserveHTTP(c.Request().Method, c.Path(), status, duration)
+{{end}}
 			logger.LogAttrs(c.Request().Context(), slog.LevelInfo, "http_request",
 				slog.String("method", c.Request().Method),
+				slog.String("route", c.Path()),
 				slog.String("path", c.Request().URL.Path),
 				slog.Int("status", status),
 				slog.String("request_id", c.Response().Header().Get("X-Request-ID")),
-				slog.Int64("duration_ms", time.Since(start).Milliseconds()),
+				slog.Int64("duration_ms", duration.Milliseconds()),
 			)
 			return err
 		}
