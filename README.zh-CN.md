@@ -17,11 +17,17 @@
 
 ## 快速开始
 
+当前代码面向尚未发布的 v0.2.0；已发布的 v0.1.0 不包含下述 Session、生产档和 upgrade 功能。发布门禁通过并明确授权打 tag 前，使用本地源码：
+
 ```bash
-go install github.com/alphayan/go-backend-kit/cmd/gobackend@v0.2.0
-gobackend new product-api --module github.com/yourname/product-api
-cd product-api
+git clone https://github.com/alphayan/go-backend-kit.git
+cd go-backend-kit
+kit_root="$(pwd)"
+GOBACKEND_DEVELOPMENT_REPLACE="$kit_root" go run ./cmd/gobackend new ../product-api --module github.com/yourname/product-api
+cd ../product-api
 ```
+
+生成的开发项目通过 replace 显式引用该源码目录，请保留它。用 `go install ...@<tag 或已推送 commit>` 安装的二进制会固定到该模块版本；其他构建方式，包括在有未提交改动的检出上 `go build`（Go 会打上 `+dirty`），都按源码构建处理：必须设置开发 replace，否则提前报错，不会去解析不存在或未发布的版本。源码可用、tag 已发布、发布 CI 通过和部署是不同状态；发布步骤见 CONTRIBUTING.md 的发布清单。
 
 `new` 的可选参数（括号内为默认值）：
 
@@ -147,7 +153,7 @@ PostgreSQL 连接池默认最多 25 个连接、25 个空闲连接，连接最�
 
 没有该基线的旧项目必须提供 `--baseline /absolute/pristine-old-project`：用原始版本生成器、相同 module/provider 和资源定义重建并核验的原始项目，或可靠的原始快照。不要把当前已修改项目或新版候选目录当作旧基线。升级要求已有生成文件清单，不会猜测文件归属；不支持就地切换 provider/profile。
 
-预览会下载所需 Go 模块，并在 gitignore 的 `.gobackend/upgrade-*` 中留下 `candidate/` 与 `plan.json`；不写业务源文件。应用前将所有被替换/删除的原文件连同权限备份到该目录的 `before/`。用户与上游同时改过的文件会阻止整批应用；手工对照候选文件合并后，用 `--keep internal/app/app.go` 等精确路径确认保留合并结果并推进其上游基线。`--keep` 只接受脚手架路径，不接受生成文件、`.env`、迁移或资源定义。自定义依赖同样需要人工合并 `go.mod`／`go.sum`，不能直接保留旧版本依赖后声称升级完成。
+预览会下载所需 Go 模块，并在 gitignore 的 `.gobackend/upgrade-*` 中留下 `candidate/` 与 `plan.json`；不写业务源文件。应用前将所有被替换/删除的原文件连同权限备份到该目录的 `before/`。用户与上游同时改过的文件会阻止整批应用；手工对照候选文件合并后，用 `--keep internal/app/app.go` 等精确路径确认保留合并结果并推进其上游基线。`--keep` 只接受脚手架路径，不接受生成文件、`.env`、迁移或资源定义。自定义依赖同样需要人工合并 `go.mod`／`go.sum`，不能直接保留旧版本依赖后声称升级完成。新版生成器不再提供的脚手架文件（例如 `.npmrc`）在仍与上游摘要一致时列为 `remove` 并先备份；已修改的副本视为冲突，可用 `--keep` 作为自有文件保留。
 
 应用使用项目锁、写前校验和逐文件替换；可观察写入失败会回滚已写文件，不覆盖回滚期间出现的新修改。它不是整个目录的原子事务：断电/强制退出时须根据 `plan.json` 和 `before/` 核验恢复或重跑；新增文件没有旧备份，人工回退前核对候选内容再删除。不要在应用期间编辑、运行其他生成器或部署该目录。保留恢复目录至验收结束，再按精确路径清理。升级不会读取真实 `.env`、执行数据库迁移、Git 提交或部署。
 
@@ -157,7 +163,7 @@ PostgreSQL 连接池默认最多 25 个连接、25 个空闲连接，连接最�
 
 `--auth session` 是仅限 Echo 的数据库登录套件，包含可撤销 HttpOnly Cookie、Argon2id 密码、固定 `admin`/`viewer` RBAC、全局标准库跨源保护、有界登录/KDF 限流和尽力写入的审计日志。它新增 `POST /auth/login`、`POST /auth/logout`、`GET /auth/me`、`POST /auth/password`，并为资源生成路由权限表和内嵌 Vue 管理端。
 
-Session 项目会把 `auth_users`、`auth_sessions`、`auth_audit_logs` 模型加入 Atlas 目标 schema；PostgreSQL 还包含共享限流表 `auth_rate_limits`。不会附带手写认证表 SQL，也不会在运行时调用 `AutoMigrate`。启动前必须显式生成、审查并应用迁移。空用户表要求成对设置引导邮箱和密码。生产必须使用 `__Host-session` Secure Cookie、TLS 和 HSTS。PostgreSQL 的 IP／邮箱额度由数据库短事务跨实例共享；SQLite 限流仅适用于单进程。可信代理还必须正确配置 Echo 的 IP 提取。审计在业务提交后写入，因此进程在窄窗口崩溃可能丢失该事件。
+Session 项目会把 `auth_users`、`auth_sessions`、`auth_audit_logs` 模型加入 Atlas 目标 schema；PostgreSQL 还包含共享限流表 `auth_rate_limits`。不会附带手写认证表 SQL，也不会在运行时调用 `AutoMigrate`。启动前必须显式生成、审查并应用迁移。空用户表要求成对设置引导邮箱和密码。生产必须使用 `__Host-session` Secure Cookie、TLS 和 HSTS。PostgreSQL 的 IP／邮箱额度由数据库短事务跨实例共享；SQLite 限流仅适用于单进程。应在 `HTTP_TRUSTED_PROXY_CIDRS` 中配置实际代理网段，留空则只认直连 IP。审计在业务提交后写入，因此进程在窄窗口崩溃可能丢失该事件。
 
 管理端位于 `/admin/`，按资源生成带 Zod 校验的类型化表单、搜索/筛选/排序表格和分页，并支持管理员增删改、viewer 只读、登录/注销、密码修改、亮色/暗色/跟随系统主题、响应式布局和可访问对话框。可运行 `make frontend-install`、`make frontend-typecheck`、`make frontend-test`、`make frontend-build`；`make frontend-dev` 通过同源代理启动 Vite。生产 Docker 构建会先编译前端，再由 Go 二进制内嵌 `web/dist`，运行镜像不包含 Node.js 或 pnpm。
 
@@ -166,7 +172,7 @@ Session 项目会把 `auth_users`、`auth_sessions`、`auth_audit_logs` 模型�
 Session 管理端还包含仅管理员可见的用户管理和审计查询：创建账号、调整角色归属、禁用/启用、会话列表与撤销、分页审计筛选。禁止修改自身角色/状态，修改他人访问权限会撤销其会话。审计保留期由 `AUTH_AUDIT_RETENTION_DAYS` 明确开启（默认 `0`，不自动删除）。
 
 ```bash
-go test -race ./...
+go test -race -timeout 30m ./...
 go vet ./...
 go tool govulncheck ./...
 ./scripts/frontend-e2e.sh

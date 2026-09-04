@@ -25,7 +25,7 @@ if [ -z "${DATABASE_URL:-}" ]; then
   DATABASE_URL="postgres://kit:kit@localhost:${port}/kit_session_test?sslmode=disable"
   export DATABASE_URL
   attempts=0
-  until docker exec "$container" pg_isready -U kit -d kit_session_test >/dev/null 2>&1; do
+  until docker exec "$container" pg_isready -h 127.0.0.1 -U kit -d kit_session_test >/dev/null 2>&1; do
     attempts=$((attempts + 1))
     if [ "$attempts" -ge 30 ]; then
       echo "PostgreSQL did not become ready" >&2

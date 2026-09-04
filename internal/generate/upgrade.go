@@ -61,6 +61,11 @@ func captureScaffoldBaseline(root, module string, opts ProjectOptions) (scaffold
 	if err != nil {
 		return scaffoldBaseline{}, err
 	}
+	// A pristine older project may still contain retired files; record them so
+	// the upgrade can remove unmodified copies.
+	for name := range retiredScaffoldPaths(opts) {
+		names[name] = true
+	}
 	dir, err := os.OpenRoot(root)
 	if err != nil {
 		return scaffoldBaseline{}, err
@@ -170,8 +175,9 @@ func parseScaffoldBaseline(data []byte, module string, opts ProjectOptions) (sca
 	if err != nil {
 		return baseline, err
 	}
+	retired := retiredScaffoldPaths(opts)
 	for name, digest := range baseline.Files {
-		if !names[name] {
+		if !names[name] && !retired[name] {
 			return baseline, fmt.Errorf("scaffold baseline claims unsupported path %q", name)
 		}
 		if _, err := hex.DecodeString(digest); err != nil || len(digest) != 64 {
@@ -265,9 +271,10 @@ func (g Generator) Upgrade(ctx context.Context, root string, options UpgradeOpti
 	if err != nil {
 		return report, err
 	}
+	retiredNames := retiredScaffoldPaths(opts)
 	keep := map[string]bool{}
 	for _, name := range options.Keep {
-		if !scaffoldNames[name] {
+		if !scaffoldNames[name] && !retiredNames[name] {
 			return report, fmt.Errorf("--keep is only allowed for selected scaffold files: %s", name)
 		}
 		keep[name] = true
@@ -347,6 +354,10 @@ func (g Generator) Upgrade(ctx context.Context, root string, options UpgradeOpti
 	for name := range scaffoldNames {
 		inputNames[name] = true
 	}
+	// Retired scaffold files recorded by the baseline are upgrade targets too.
+	for name := range baseline.Files {
+		inputNames[name] = true
+	}
 	for name := range oldGenerated.Files {
 		inputNames[name] = true
 	}
@@ -422,6 +433,9 @@ func (g Generator) Upgrade(ctx context.Context, root string, options UpgradeOpti
 	for name := range desired {
 		names[name] = true
 	}
+	for name := range baseline.Files {
+		names[name] = true
+	}
 	ordered := make([]string, 0, len(names))
 	for name := range names {
 		ordered = append(ordered, name)
@@ -454,7 +468,7 @@ func (g Generator) Upgrade(ctx context.Context, root string, options UpgradeOpti
 			continue
 		}
 		oldDigest, owned := oldGenerated.Files[name]
-		if scaffoldNames[name] {
+		if scaffoldNames[name] || retiredNames[name] {
 			oldDigest, owned = baseline.Files[name]
 			// Preserve user edits if upstream did not change this scaffold file.
 			if owned && next.exists && oldDigest == generatedDigest(next.data) {

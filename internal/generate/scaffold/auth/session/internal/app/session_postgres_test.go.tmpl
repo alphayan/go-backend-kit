@@ -96,6 +96,25 @@ func TestPostgresSessionAuthenticationE2E(t *testing.T) {
 	if err := db.Model(&auth.Session{}).Where("user_id = ?", concurrent.ID).Count(&sessions).Error; err != nil { t.Fatal(err) }
 	if sessions != 8 { t.Fatalf("concurrent sessions = %d, want 8", sessions) }
 
+	// A login holding an already-verified snapshot resumes only after a password
+	// change commits. No timing sleeps or new schema fields are needed.
+	changed := make(chan struct{})
+	stale := make(chan error, 1)
+	wg.Go(func() {
+		<-changed
+		_, err := store.CreateSession(t.Context(), concurrent, "stale-rehash", "", "old-login", "127.0.0.1", time.Hour, time.Now().UTC())
+		stale <- err
+	})
+	replacement, changeErr := store.ChangePasswordAndRotate(t.Context(), concurrent.ID, concurrent.PasswordHash, "replacement-hash", "new-login", "127.0.0.1", time.Hour, time.Now().UTC())
+	close(changed)
+	wg.Wait()
+	if changeErr != nil { t.Fatal(changeErr) }
+	if err := <-stale; err != auth.ErrCredentialsChanged { t.Fatalf("stale verification after change: %v", err) }
+	if _, err := store.ChangePasswordAndRotate(t.Context(), concurrent.ID, concurrent.PasswordHash, "stale-change", "old", "127.0.0.1", time.Hour, time.Now().UTC()); err != auth.ErrCredentialsChanged { t.Fatalf("stale password change: %v", err) }
+	current, err := store.FindUserByID(t.Context(), concurrent.ID)
+	if err != nil || current.PasswordHash != "replacement-hash" { t.Fatalf("password overwritten: %v", err) }
+	if _, err := store.Authenticate(t.Context(), replacement, time.Now().UTC(), time.Hour); err != nil { t.Fatalf("current session lost: %v", err) }
+
 	first := createSessionTestUser(t, store, passwords, "first@example.com", "admin", "correct horse battery staple")
 	second := createSessionTestUser(t, store, passwords, "second@example.com", "admin", "correct horse battery staple")
 	start := make(chan struct{})

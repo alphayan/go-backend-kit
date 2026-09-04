@@ -1,7 +1,7 @@
 {{if .Options.HasSession}}FROM node:{{.Pins.Node}}-alpine3.24 AS frontend-build
 
 WORKDIR /src
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN corepack enable && pnpm install --frozen-lockfile
 COPY web ./web
 RUN pnpm frontend:build

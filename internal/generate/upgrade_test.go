@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -362,5 +363,83 @@ func TestApplyUpgradeRollbackAndConcurrentEdits(t *testing.T) {
 				t.Fatalf("rollback mode: %v, %v", info, err)
 			}
 		})
+	}
+}
+
+func TestUpgradeRemovesRetiredScaffoldFile(t *testing.T) {
+	kit, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := Generator{Version: "v0.1.0", DevelopmentReplace: kit}
+	opts := DefaultProjectOptions()
+	opts.Auth = AuthSession
+	root := filepath.Join(t.TempDir(), "session")
+	if err := g.New(t.Context(), root, "example.com/session-retired", opts); err != nil {
+		t.Fatal(err)
+	}
+	// Model a project generated before .npmrc was retired: the file exists and
+	// the upstream baseline records its digest.
+	upstream := []byte("engine-strict=true\nsave-exact=true\n")
+	recordRetired := func(content []byte) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, ".npmrc"), content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(filepath.Join(root, scaffoldBaselineName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		base, err := parseScaffoldBaseline(data, "example.com/session-retired", opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		base.Files[".npmrc"] = generatedDigest(upstream)
+		if err := writeScaffoldBaseline(root, base); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recordRetired(upstream)
+	g.Version = "v0.2.0"
+	preview, err := g.Upgrade(t.Context(), root, UpgradeOptions{})
+	if err != nil || !slices.Contains(preview.Changes, UpgradeChange{".npmrc", "remove"}) {
+		t.Fatalf("preview = %+v, %v", preview, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".npmrc")); err != nil {
+		t.Fatal("preview removed the retired file")
+	}
+	report, err := g.Upgrade(t.Context(), root, UpgradeOptions{Apply: true})
+	if err != nil || !report.Applied {
+		t.Fatalf("apply = %+v, %v", report, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".npmrc")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("retired file survived apply: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(report.Directory, "before", ".npmrc")); err != nil || !bytes.Equal(got, upstream) {
+		t.Fatalf("retired file was not backed up: %v", err)
+	}
+	if err := g.Check(t.Context(), root); err != nil {
+		t.Fatal(err)
+	}
+	// A user-modified retired file is a conflict, resolved only by explicit --keep.
+	recordRetired([]byte("registry=https://example.test\n"))
+	if _, err := g.Upgrade(t.Context(), root, UpgradeOptions{Apply: true}); err == nil || !strings.Contains(err.Error(), "conflicts") {
+		t.Fatalf("modified retired file accepted: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".npmrc")); err != nil {
+		t.Fatal("conflict removed the modified retired file")
+	}
+	if _, err := g.Upgrade(t.Context(), root, UpgradeOptions{Apply: true, Keep: []string{".npmrc"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(root, ".npmrc")); err != nil || string(got) != "registry=https://example.test\n" {
+		t.Fatalf("kept retired file changed: %v", err)
+	}
+	// A retired path that no baseline ever recorded is a user file and is left alone.
+	if _, err := g.Upgrade(t.Context(), root, UpgradeOptions{Apply: true}); err != nil {
+		t.Fatalf("user-owned retired path blocked upgrade: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".npmrc")); err != nil {
+		t.Fatal("user-owned file at a retired path was removed")
 	}
 }

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 {{if .Options.IsProduction}}# A schema diff against the disposable dev database needs no target credentials.
 case "${1:-}:${2:-}" in
@@ -27,7 +27,7 @@ created_dev_container=$(docker run -d --name "$dev_container_name" \
   -p 127.0.0.1::5432 {{.Pins.PostgresImage}})
 dev_container=$created_dev_container
 attempts=0
-until docker exec "$dev_container" pg_isready -U postgres >/dev/null 2>&1; do
+until docker exec "$dev_container" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; do
   attempts=$((attempts + 1))
   if [ "$attempts" -ge 30 ]; then
     echo "Atlas development database did not become ready" >&2
@@ -50,6 +50,7 @@ container_database_url=$(printf '%s' "$container_database_url" | sed \
   -e "s/@127\\.0\\.0\\.1:/@${atlas_host}:/g")
 
 DATABASE_URL=$container_database_url ATLAS_DEV_URL=$container_dev_url docker run --rm \
+  --user "$(id -u):$(id -g)" -e HOME=/tmp \
   "$network_option" \
   -e DATABASE_URL \
   -e ATLAS_DEV_URL \

@@ -35,8 +35,8 @@ func TestPostgresSharedLimiter(t *testing.T) {
 		results := make(chan bool, 16)
 		for i := range 16 {
 			wg.Go(func() {
-				ip, email := "shared-ip", ""
-				if mode == "email" { ip, email = fmt.Sprintf("%d-%d", os.Getpid(), i), " Shared@Example.test " }
+				ip, email := "192.0.2.10", ""
+				if mode == "email" { ip, email = fmt.Sprintf("2001:db8:%x:%x::1", os.Getpid()&0xffff, i), " Shared@Example.test " }
 				// Deliberately skew client clocks: only the database clock may expire a bucket.
 				allowed, err := limiter.Allow(t.Context(), ip, email, time.Now().Add(24*time.Hour))
 				if err != nil { t.Error(err) }
@@ -56,6 +56,8 @@ func TestPostgresSharedLimiter(t *testing.T) {
 	}
 	clear()
 	t.Cleanup(clear)
+	assertLoginIPNormalization(t, limiter)
+	clear()
 	for _, mode := range []string{"ip", "email"} {
 		clear()
 		commands := make([]*exec.Cmd, 2)
@@ -78,22 +80,22 @@ func TestPostgresSharedLimiter(t *testing.T) {
 		if mode == "email" { want = 6 }
 		if total != want { t.Fatalf("two processes admitted %d %s attempts, want %d", total, mode, want) }
 		if mode == "ip" {
-			if allowed, err := limiter.Allow(t.Context(), "shared-ip", "", time.Now().Add(72*time.Hour)); err != nil || allowed {
+			if allowed, err := limiter.Allow(t.Context(), "192.0.2.10", "", time.Now().Add(72*time.Hour)); err != nil || allowed {
 				t.Fatalf("fresh limiter / skewed application clock bypassed shared quota: %v, %v", allowed, err)
 			}
 		}
 	}
 	if err := limiter.ClearEmail(t.Context(), "shared@example.test"); err != nil { t.Fatal(err) }
-	if allowed, err := limiter.Allow(t.Context(), "after-success", "shared@example.test", time.Time{}); err != nil || !allowed {
+	if allowed, err := limiter.Allow(t.Context(), "192.0.2.11", "shared@example.test", time.Time{}); err != nil || !allowed {
 		t.Fatalf("clear email: allowed=%v, err=%v", allowed, err)
 	}
 	clear()
 	// Fill the IP keyspace without 10,000 network round trips. Saturation must
 	// reject NEW identities, not evict an existing identity's exhausted budget.
 	rows := make([]RateLimit, rateLimitKeyCapacity)
-	for i := range rows { rows[i] = RateLimit{Kind: "ip", KeyDigest: rateKeyDigest(fmt.Sprint(i)), Count: 2, ExpiresAt: time.Now().Add(time.Hour)} }
+	for i := range rows { rows[i] = RateLimit{Kind: "ip", KeyDigest: rateKeyDigest(fmt.Sprintf("10.0.%d.%d", i/256, i%256)), Count: 2, ExpiresAt: time.Now().Add(time.Hour)} }
 	if err := db.CreateInBatches(rows, 500).Error; err != nil { t.Fatal(err) }
-	for _, key := range []string{"0", "new-key"} {
+	for _, key := range []string{"10.0.0.0", "203.0.113.1"} {
 		if allowed, err := limiter.Allow(t.Context(), key, "", time.Now()); err != nil || allowed {
 			t.Fatalf("full keyspace allowed %q: %v, %v", key, allowed, err)
 		}
@@ -101,18 +103,18 @@ func TestPostgresSharedLimiter(t *testing.T) {
 	var count int64
 	if err := db.Model(&RateLimit{}).Count(&count).Error; err != nil || count != rateLimitKeyCapacity { t.Fatalf("bounded rows=%d: %v", count, err) }
 	if err := db.Model(&RateLimit{}).Where("1 = 1").Update("expires_at", time.Unix(0, 0)).Error; err != nil { t.Fatal(err) }
-	if allowed, err := limiter.Allow(t.Context(), "new-key", "", time.Now()); err != nil || !allowed { t.Fatalf("expiry: %v, %v", allowed, err) }
+	if allowed, err := limiter.Allow(t.Context(), "203.0.113.1", "", time.Now()); err != nil || !allowed { t.Fatalf("expiry: %v, %v", allowed, err) }
 	if err := db.Model(&RateLimit{}).Count(&count).Error; err != nil || count != 1 { t.Fatalf("expired rows=%d: %v", count, err) }
 	// Prove lock waits obey cancellation and leave no reservation behind.
 	tx := db.Begin()
 	if tx.Error != nil { t.Fatal(tx.Error) }
 	if err := tx.Exec("LOCK TABLE auth_rate_limits IN EXCLUSIVE MODE").Error; err != nil { _ = tx.Rollback(); t.Fatal(err) }
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
-	allowed, waitErr := limiter.Allow(ctx, "cancelled", "", time.Now())
+	allowed, waitErr := limiter.Allow(ctx, "192.0.2.12", "", time.Now())
 	cancel()
 	if err := tx.Rollback().Error; err != nil { t.Fatal(err) }
 	if waitErr == nil || allowed { t.Fatalf("lock cancellation: allowed=%v, err=%v", allowed, waitErr) }
-	if err := db.Model(&RateLimit{}).Where("key_digest = ?", rateKeyDigest("cancelled")).Count(&count).Error; err != nil || count != 0 { t.Fatalf("cancelled reservation rows=%d: %v", count, err) }
+	if err := db.Model(&RateLimit{}).Where("key_digest = ?", rateKeyDigest("192.0.2.12")).Count(&count).Error; err != nil || count != 0 { t.Fatalf("cancelled reservation rows=%d: %v", count, err) }
 	clear()
 	closedDB, err := gorm.Open(postgres.Open(os.Getenv("TEST_RATE_DATABASE_URL")), &gorm.Config{Logger: gormlogger.Default.LogMode(gormlogger.Silent)})
 	if err != nil { t.Fatal(err) }
@@ -120,5 +122,5 @@ func TestPostgresSharedLimiter(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	if err := closedPool.Close(); err != nil { t.Fatal(err) }
 	broken := NewLoginLimiter(NewStore(closedDB), 2, time.Minute)
-	if allowed, err := broken.Allow(t.Context(), "unavailable", "", time.Now()); err == nil || allowed { t.Fatalf("database failure allowed=%v, err=%v", allowed, err) }
+	if allowed, err := broken.Allow(t.Context(), "192.0.2.13", "", time.Now()); err == nil || allowed { t.Fatalf("database failure allowed=%v, err=%v", allowed, err) }
 }

@@ -1,4 +1,9 @@
 packages: []
 
+# pnpm 11 reads its own settings here, not from .npmrc: engineStrict makes the
+# pinned Node/pnpm engines a hard failure instead of a warning.
+engineStrict: true
+saveExact: true
+
 allowBuilds:
   vue-demi: true

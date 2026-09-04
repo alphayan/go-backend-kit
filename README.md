@@ -17,11 +17,17 @@ The default profile is intentionally personal: Echo + SQLite + slog, with no Red
 
 ## Install and create a project
 
+This checkout targets the unreleased v0.2.0. The published v0.1.0 does not contain the Session/production/upgrade features below. Until the release gates pass and a tag is explicitly published, use a local source checkout:
+
 ```bash
-go install github.com/alphayan/go-backend-kit/cmd/gobackend@v0.2.0
-gobackend new product-api --module github.com/yourname/product-api
-cd product-api
+git clone https://github.com/alphayan/go-backend-kit.git
+cd go-backend-kit
+kit_root="$(pwd)"
+GOBACKEND_DEVELOPMENT_REPLACE="$kit_root" go run ./cmd/gobackend new ../product-api --module github.com/yourname/product-api
+cd ../product-api
 ```
+
+Keep the source checkout available: the generated development project explicitly replaces the generator module with that local path. A binary installed with `go install ...@<tag or pushed commit>` pins that module version instead. Any other build, including `go build` from a modified checkout (Go stamps it `+dirty`), is a source build: it requires the development replacement and fails early instead of resolving a nonexistent or unpublished revision. Source availability, a published tag, passing release CI and deployment are separate states; see the release checklist in CONTRIBUTING.md.
 
 Optional flags on `new` (defaults shown):
 
@@ -177,7 +183,7 @@ Run the newer `gobackend upgrade` inside the project to preview; only `gobackend
 
 Older projects without that baseline require `--baseline /absolute/pristine-old-project`: a verified reconstruction using the original generator, matching module/providers/resource definitions, or a trustworthy original snapshot. Never use the modified project or the new candidate as the old baseline. An existing generated-file manifest is required; ownership is not guessed. Provider/profile changes are not supported in place.
 
-Preview resolves Go dependencies and retains `candidate/` and `plan.json` under gitignored `.gobackend/upgrade-*`, without changing application sources. Apply first backs up every replaced/deleted original with its permissions into `before/` in that private directory. Concurrent upstream/user edits block the entire batch. After manually merging against the candidate, explicitly use `--keep internal/app/app.go` (repeat for each resolved scaffold path) to retain your merged file and advance its upstream baseline. Generated outputs, `.env`, migrations and resource definitions cannot be kept/overridden this way. Merge custom dependency changes in `go.mod`/`go.sum` too; keeping stale dependencies is not a completed upgrade.
+Preview resolves Go dependencies and retains `candidate/` and `plan.json` under gitignored `.gobackend/upgrade-*`, without changing application sources. Apply first backs up every replaced/deleted original with its permissions into `before/` in that private directory. Concurrent upstream/user edits block the entire batch. After manually merging against the candidate, explicitly use `--keep internal/app/app.go` (repeat for each resolved scaffold path) to retain your merged file and advance its upstream baseline. Generated outputs, `.env`, migrations and resource definitions cannot be kept/overridden this way. Merge custom dependency changes in `go.mod`/`go.sum` too; keeping stale dependencies is not a completed upgrade. Scaffold files that a newer generator no longer ships (for example `.npmrc`) are reported as `remove` and backed up when they still match their upstream digest; a modified copy is a conflict that `--keep` retains as your own file.
 
 Apply uses the project lock, change detection and per-file replacement, rolling back observed write failures without overwriting newer concurrent edits. It is not an atomic directory transaction: after power loss/forced exit, inspect `plan.json` and `before/` to recover or retry. New files have no original backup; compare against the candidate before removing them during manual rollback. Do not edit, run other generators or deploy the directory during apply. Retain recovery artifacts until validation, then remove only the exact upgrade directory. Upgrade never reads real `.env`, migrates databases, commits or deploys.
 
@@ -187,7 +193,7 @@ After upgrading, run `go mod tidy`, `go tool gobackend generate`, `go tool gobac
 
 `--auth session` is an Echo-only, database-backed login kit with revocable HttpOnly cookies, Argon2id passwords, fixed `admin`/`viewer` RBAC, global standard-library cross-origin protection, bounded login/KDF limits, and best-effort audit logs. It adds `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`, and `POST /auth/password`, plus generated route-permission tables and an embedded Vue admin console for resources.
 
-Session projects model `auth_users`, `auth_sessions`, and `auth_audit_logs` in the Atlas desired schema; PostgreSQL also includes the shared limiter's `auth_rate_limits`. They do not ship handwritten authentication-table SQL or call `AutoMigrate` at runtime: create, review, and apply an explicit migration before starting. Empty user tables require the paired bootstrap email/password environment variables. Production requires the `__Host-session` Secure cookie, TLS, and HSTS. PostgreSQL shares IP/email budgets across instances using short database transactions; SQLite limiting is single-process only. Trusted proxies must configure Echo IP extraction correctly. Audit writes happen after business commit, so a crash in that narrow window can lose the audit event.
+Session projects model `auth_users`, `auth_sessions`, and `auth_audit_logs` in the Atlas desired schema; PostgreSQL also includes the shared limiter's `auth_rate_limits`. They do not ship handwritten authentication-table SQL or call `AutoMigrate` at runtime: create, review, and apply an explicit migration before starting. Empty user tables require the paired bootstrap email/password environment variables. Production requires the `__Host-session` Secure cookie, TLS, and HSTS. PostgreSQL shares IP/email budgets across instances using short database transactions; SQLite limiting is single-process only. Configure `HTTP_TRUSTED_PROXY_CIDRS` for actual proxy hops; empty means direct-IP mode. Audit writes happen after business commit, so a crash in that narrow window can lose the audit event.
 
 The console is available at `/admin/`. It generates typed Zod forms, searchable/filterable/sortable tables, pagination, admin-only create/update/delete controls, viewer read-only behavior, login/logout, password change, light/dark/system themes, responsive layouts, and accessible dialogs. Use `make frontend-install`, `make frontend-typecheck`, `make frontend-test`, and `make frontend-build`; `make frontend-dev` runs Vite with a same-origin development proxy. The production Docker build compiles the frontend before the Go binary embeds `web/dist`, so Node.js and pnpm are not present in the runtime image.
 
@@ -196,7 +202,7 @@ The console is available at `/admin/`. It generates typed Zod forms, searchable/
 Session consoles also include admin-only Users and Audit logs pages: account creation, role assignment, disable/re-enable, session listing/revocation, and paginated audit filters. Administrators cannot change their own role/status. Access changes revoke the target user's sessions. Audit retention is opt-in through `AUTH_AUDIT_RETENTION_DAYS` (default `0`, disabled).
 
 ```bash
-go test -race ./...
+go test -race -timeout 30m ./...
 go vet ./...
 go tool govulncheck ./...
 ./scripts/frontend-e2e.sh

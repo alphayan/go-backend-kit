@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 var (
 	ErrSessionNotFound = errors.New("session not found")
 	ErrUserNotFound    = errors.New("user not found")
+	ErrCredentialsChanged = errors.New("credentials changed during authentication")
 )
 
 type Store struct{ db *gorm.DB }
@@ -46,10 +48,6 @@ func (s *Store) CreateUser(ctx context.Context, email, passwordHash, role string
 	return user, nil
 }
 
-func (s *Store) UpdatePasswordHash(ctx context.Context, userID int64, passwordHash string) error {
-	return s.db.WithContext(ctx).Model(&User{}).Where("id = ?", userID).Update("password_hash", passwordHash).Error
-}
-
 func (s *Store) Bootstrap(ctx context.Context, email, password string, passwords *PasswordManager) (created, ignored bool, err error) {
 	var count int64
 	if err := s.db.WithContext(ctx).Model(&User{}).Count(&count).Error; err != nil {
@@ -60,6 +58,9 @@ func (s *Store) Bootstrap(ctx context.Context, email, password string, passwords
 	}
 	if strings.TrimSpace(email) == "" || password == "" {
 		return false, false, errors.New("auth_users is empty; AUTH_BOOTSTRAP_EMAIL and AUTH_BOOTSTRAP_PASSWORD are required")
+	}
+	if !ValidEmail(normalizeEmail(email)) || !ValidNewPassword(password) {
+		return false, false, errors.New("bootstrap requires a valid email and a password of 12 to 1024 bytes")
 	}
 	permit, ok := passwords.TryAcquire()
 	if !ok {
@@ -76,18 +77,21 @@ func (s *Store) Bootstrap(ctx context.Context, email, password string, passwords
 	return true, false, nil
 }
 
-func (s *Store) CreateSession(ctx context.Context, userID int64, previousToken, userAgent, ip string, ttl time.Duration, now time.Time) (string, error) {
-	return s.createSessionInDB(ctx, s.db, userID, previousToken, userAgent, ip, ttl, now)
-}
-
-func (s *Store) createSessionInDB(ctx context.Context, db *gorm.DB, userID int64, previousToken, userAgent, ip string, ttl time.Duration, now time.Time) (string, error) {
+// Finalize the verified snapshot and optional rehash under the same user lock as
+// password changes. A stale verification must neither overwrite a new password
+// nor issue a session after password-change revocation has committed.
+func (s *Store) CreateSession(ctx context.Context, verified User, replacementHash, previousToken, userAgent, ip string, ttl time.Duration, now time.Time) (string, error) {
 	token := NewSessionToken()
-	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var user User
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("id = ? AND disabled_at IS NULL", userID).Take(&user).Error; err != nil {
+			Where("id = ? AND disabled_at IS NULL", verified.ID).Take(&user).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) { return ErrUserNotFound }
 			return err
+		}
+		if user.PasswordHash != verified.PasswordHash { return ErrCredentialsChanged }
+		if replacementHash != "" {
+			if err := tx.Model(&user).Update("password_hash", replacementHash).Error; err != nil { return err }
 		}
 		if previousToken != "" {
 			if err := tx.Where("token_digest = ?", tokenDigest(previousToken)).Delete(&Session{}).Error; err != nil {
@@ -95,7 +99,7 @@ func (s *Store) createSessionInDB(ctx context.Context, db *gorm.DB, userID int64
 			}
 		}
 		session := Session{
-			UserID: userID, TokenDigest: tokenDigest(token), ExpiresAt: now.Add(ttl),
+			UserID: user.ID, TokenDigest: tokenDigest(token), ExpiresAt: now.Add(ttl),
 			LastSeenAt: now, UserAgent: truncate(userAgent, 512), IP: truncate(ip, 64),
 		}
 		return tx.Create(&session).Error
@@ -175,15 +179,15 @@ func (s *Store) DeleteUserSessions(ctx context.Context, userID int64) error {
 	return s.db.WithContext(ctx).Where("user_id = ?", userID).Delete(&Session{}).Error
 }
 
-func (s *Store) ChangePasswordAndRotate(ctx context.Context, userID int64, passwordHash, userAgent, ip string, ttl time.Duration, now time.Time) (string, error) {
+func (s *Store) ChangePasswordAndRotate(ctx context.Context, userID int64, verifiedHash, passwordHash, userAgent, ip string, ttl time.Duration, now time.Time) (string, error) {
 	token := NewSessionToken()
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&User{}).Where("id = ? AND disabled_at IS NULL", userID).Update("password_hash", passwordHash)
+		result := tx.Model(&User{}).Where("id = ? AND disabled_at IS NULL AND password_hash = ?", userID, verifiedHash).Update("password_hash", passwordHash)
 		if result.Error != nil {
 			return result.Error
 		}
 		if result.RowsAffected != 1 {
-			return ErrUserNotFound
+			return ErrCredentialsChanged
 		}
 		if err := tx.Where("user_id = ?", userID).Delete(&Session{}).Error; err != nil {
 			return err
@@ -227,6 +231,13 @@ func (s *Store) SweepExpired(ctx context.Context, interval time.Duration, onErro
 }
 
 func normalizeEmail(email string) string { return strings.ToLower(strings.TrimSpace(email)) }
+
+func ValidEmail(value string) bool {
+	address, err := mail.ParseAddress(value)
+	return err == nil && strings.EqualFold(address.Address, value) && len(value) <= 320
+}
+
+func ValidNewPassword(value string) bool { return len(value) >= 12 && len(value) <= 1024 }
 
 func truncate(value string, limit int) string {
 	if len(value) <= limit {

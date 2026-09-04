@@ -150,7 +150,7 @@ if os.Getenv("PROBE_AUTH")=="1"{
 passwords,err:=auth.NewPasswordManager(auth.DefaultPasswordParams(),1);check(err)
 s:=auth.NewStore(c.ORM);_,_,err=s.Bootstrap(ctx,"runtime-control@example.test","disposable user password",passwords);check(err)
 u,err:=s.FindUserByEmail(ctx,"runtime-control@example.test");check(err)
-token,err:=s.CreateSession(ctx,u.ID,"","probe","127.0.0.1",time.Hour,time.Now().UTC());check(err)
+token,err:=s.CreateSession(ctx,u,"","","probe","127.0.0.1",time.Hour,time.Now().UTC());check(err)
 identity,err:=s.Authenticate(ctx,token,time.Now().UTC(),time.Hour);check(err);if identity.Role!="admin"{os.Exit(1)}
 check(s.DeleteSession(ctx,token))
 };check(c.Close())}

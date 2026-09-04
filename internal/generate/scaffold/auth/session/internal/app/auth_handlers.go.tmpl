@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"net/mail"
 	"strings"
 	"time"
 
@@ -60,19 +59,17 @@ func (h *authHandler) login(c *echo.Context) error {
 		return httpx.WriteError(c, apperror.BadRequest("invalid_json", "request body must be valid JSON"))
 	}
 	input.Email = strings.ToLower(strings.TrimSpace(input.Email))
-	if !validEmail(input.Email) || input.Password == "" || len(input.Password) > 1024 {
+	if !auth.ValidEmail(input.Email) || input.Password == "" || len(input.Password) > 1024 {
 		return httpx.WriteError(c, apperror.BadRequest("invalid_credentials", "email and password are required"))
 	}
 	now := time.Now().UTC()
 	allowed, err := h.limiter.Allow(c.Request().Context(), c.RealIP(), input.Email, now)
 	if err != nil { return httpx.WriteError(c, err) }
 	if !allowed {
-		h.audit(c, nil, "rate_limit", "denied")
 		return httpx.WriteError(c, apperror.TooManyRequests())
 	}
 	permit, ok := h.passwords.TryAcquire()
 	if !ok {
-		h.audit(c, nil, "hash_capacity", "denied")
 		return httpx.WriteError(c, apperror.TooManyRequests())
 	}
 	defer permit.Release()
@@ -95,17 +92,19 @@ func (h *authHandler) login(c *echo.Context) error {
 		return httpx.WriteError(c, apperror.Unauthorized())
 	}
 	if err := h.limiter.ClearEmail(c.Request().Context(), input.Email); err != nil { return httpx.WriteError(c, err) }
+	var replacementHash string
 	if rehash {
 		if replacement, err := permit.Hash(input.Password); err != nil {
 			h.logger.ErrorContext(c.Request().Context(), "password rehash failed", "error", err)
-		} else if err := h.store.UpdatePasswordHash(c.Request().Context(), user.ID, replacement); err != nil {
-			h.logger.ErrorContext(c.Request().Context(), "password rehash update failed", "error", err)
+		} else {
+			replacementHash = replacement
 		}
 	}
 	previous := auth.SessionToken(c.Request(), h.cfg.AuthSessionSecure)
-	token, err := h.store.CreateSession(c.Request().Context(), user.ID, previous, c.Request().UserAgent(), c.RealIP(), h.cfg.AuthSessionTTL, now)
+	token, err := h.store.CreateSession(c.Request().Context(), user, replacementHash, previous, c.Request().UserAgent(), c.RealIP(), h.cfg.AuthSessionTTL, now)
 	if err != nil {
 		h.audit(c, new(user.ID), "login", "failure")
+		if errors.Is(err, auth.ErrCredentialsChanged) || errors.Is(err, auth.ErrUserNotFound) { return httpx.WriteError(c, apperror.Unauthorized()) }
 		return httpx.WriteError(c, err)
 	}
 	auth.SetSessionCookie(c.Response(), token, h.cfg.AuthSessionSecure, h.cfg.AuthSessionTTL)
@@ -118,7 +117,6 @@ func (h *authHandler) logout(c *echo.Context) error {
 	allowed, err := h.limiter.Allow(c.Request().Context(), c.RealIP(), "", now)
 	if err != nil { return httpx.WriteError(c, err) }
 	if !allowed {
-		h.audit(c, nil, "rate_limit", "denied")
 		return httpx.WriteError(c, apperror.TooManyRequests())
 	}
 	token := auth.SessionToken(c.Request(), h.cfg.AuthSessionSecure)
@@ -158,12 +156,11 @@ func (h *authHandler) changePassword(c *echo.Context) error {
 	if err := httpx.DecodeJSON(c.Request().Body, &input); err != nil {
 		return httpx.WriteError(c, apperror.BadRequest("invalid_json", "request body must be valid JSON"))
 	}
-	if len(input.NewPassword) < 12 || len(input.NewPassword) > 1024 || input.CurrentPassword == "" || len(input.CurrentPassword) > 1024 {
+	if !auth.ValidNewPassword(input.NewPassword) || input.CurrentPassword == "" || len(input.CurrentPassword) > 1024 {
 		return httpx.WriteError(c, apperror.BadRequest("invalid_password", "new password must be between 12 and 1024 bytes"))
 	}
 	permit, acquired := h.passwords.TryAcquire()
 	if !acquired {
-		h.audit(c, new(identity.UserID), "hash_capacity", "denied")
 		return httpx.WriteError(c, apperror.TooManyRequests())
 	}
 	defer permit.Release()
@@ -180,9 +177,10 @@ func (h *authHandler) changePassword(c *echo.Context) error {
 	if err != nil {
 		return httpx.WriteError(c, err)
 	}
-	token, err := h.store.ChangePasswordAndRotate(c.Request().Context(), identity.UserID, hash, c.Request().UserAgent(), c.RealIP(), h.cfg.AuthSessionTTL, time.Now().UTC())
+	token, err := h.store.ChangePasswordAndRotate(c.Request().Context(), identity.UserID, user.PasswordHash, hash, c.Request().UserAgent(), c.RealIP(), h.cfg.AuthSessionTTL, time.Now().UTC())
 	if err != nil {
 		h.audit(c, new(identity.UserID), "password_change", "failure")
+		if errors.Is(err, auth.ErrCredentialsChanged) { return httpx.WriteError(c, apperror.Unauthorized()) }
 		return httpx.WriteError(c, err)
 	}
 	auth.SetSessionCookie(c.Response(), token, h.cfg.AuthSessionSecure, h.cfg.AuthSessionTTL)
@@ -195,9 +193,4 @@ func (h *authHandler) audit(c *echo.Context, actorID *int64, action, outcome str
 		ActorID: actorID, Action: action, Resource: "auth", Outcome: outcome,
 		RequestID: requestID(c), CreatedAt: time.Now().UTC(),
 	})
-}
-
-func validEmail(value string) bool {
-	address, err := mail.ParseAddress(value)
-	return err == nil && strings.EqualFold(address.Address, value) && len(value) <= 320
 }

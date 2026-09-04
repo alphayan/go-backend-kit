@@ -18,6 +18,7 @@ export default defineConfig({
     cwd: fileURLToPath(new URL("..", import.meta.url)),
     url: `${baseURL}/health/ready`,
     reuseExistingServer: false,
+    stdout: "pipe",
     timeout: 120_000,
     gracefulShutdown: { signal: "SIGTERM", timeout: 15_000 },
     env: {

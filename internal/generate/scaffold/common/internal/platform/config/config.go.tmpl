@@ -2,6 +2,7 @@ package config
 
 import (
 {{if .Options.HasJWT}}	"encoding/base64"
+{{end}}{{if .Options.HasSession}}	"net"
 {{end}}	"errors"
 	"os"
 	"strconv"
@@ -19,6 +20,7 @@ type Config struct {
 {{end}}	CORSOrigins    []string
 	RequestTimeout time.Duration
 {{if .Options.HasSession}}	Warnings                      []string
+	TrustedProxyCIDRs             []*net.IPNet
 	AuthSessionSecure             bool
 	AuthSessionTTL                time.Duration
 	AuthSessionIdleTimeout        time.Duration
@@ -210,6 +212,20 @@ func load(getenv envLookup) (Config, error) {
 	}
 {{if .Options.IsProduction}}	if !secure {
 		return Config{}, errors.New("AUTH_SESSION_SECURE must be true for the production profile")
+	}
+{{end}}	if raw := strings.TrimSpace(getenv("HTTP_TRUSTED_PROXY_CIDRS")); raw != "" {
+		for value := range strings.SplitSeq(raw, ",") {
+			_, network, err := net.ParseCIDR(strings.TrimSpace(value))
+			if err != nil { return Config{}, errors.New("HTTP_TRUSTED_PROXY_CIDRS must contain valid comma-separated CIDRs") }
+			ones, bits := network.Mask.Size()
+			// net.IPNet treats mapped IPv4 /96 as IPv4 /0.
+			if bits == 128 && network.IP.To4() != nil { ones -= 96 }
+			if ones == 0 { return Config{}, errors.New("HTTP_TRUSTED_PROXY_CIDRS must not trust every address") }
+			cfg.TrustedProxyCIDRs = append(cfg.TrustedProxyCIDRs, network)
+		}
+	}
+{{if .Options.IsProduction}}	if len(cfg.TrustedProxyCIDRs) == 0 {
+		cfg.Warnings = append(cfg.Warnings, "HTTP_TRUSTED_PROXY_CIDRS is empty; behind a reverse proxy all clients share its login budget and recorded IP")
 	}
 {{end}}	bootstrapEmail := strings.TrimSpace(getenv("AUTH_BOOTSTRAP_EMAIL"))
 	bootstrapPassword := getenv("AUTH_BOOTSTRAP_PASSWORD")

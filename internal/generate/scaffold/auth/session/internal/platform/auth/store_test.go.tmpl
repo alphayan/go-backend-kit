@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +19,12 @@ func TestBootstrapContract(t *testing.T) {
 	if _, _, err := store.Bootstrap(t.Context(), "", "", passwords); err == nil {
 		t.Fatal("empty database bootstrapped without credentials")
 	}
+	for _, input := range [][2]string{ {"admin", "valid bootstrap password"}, {"Name <admin@example.com>", "valid bootstrap password"}, {"admin@example.com", strings.Repeat("x", 11)}, {"admin@example.com", strings.Repeat("x", 1025)} } {
+		if _, _, err := store.Bootstrap(t.Context(), input[0], input[1], passwords); err == nil { t.Fatal("invalid bootstrap credentials accepted") }
+	}
+	var count int64
+	if err := db.Model(&User{}).Count(&count).Error; err != nil || count != 0 { t.Fatalf("invalid bootstrap persisted users: %d, %v", count, err) }
+	if !ValidNewPassword(strings.Repeat("x", 12)) || !ValidNewPassword(strings.Repeat("x", 1024)) { t.Fatal("valid password boundaries rejected") }
 	created, ignored, err := store.Bootstrap(t.Context(), "Admin@Example.com", "unique bootstrap password", passwords)
 	if err != nil || !created || ignored {
 		t.Fatalf("Bootstrap() = %v, %v, %v", created, ignored, err)
@@ -30,6 +37,29 @@ func TestBootstrapContract(t *testing.T) {
 	if err != nil || created || !ignored {
 		t.Fatalf("existing Bootstrap() = %v, %v, %v", created, ignored, err)
 	}
+	if created, ignored, err := store.Bootstrap(t.Context(), "invalid", "x", passwords); err != nil || created || !ignored { t.Fatalf("existing user bootstrap must ignore stale inputs: %v %v %v", created, ignored, err) }
+}
+
+func TestStalePasswordVerificationCannotOverwriteOrCreateSession(t *testing.T) {
+	db := authTestDB(t)
+	store := NewStore(db)
+	user := authTestUser(t, store, authTestPasswords(t), "admin@example.com", "admin")
+	now := time.Now().UTC()
+	// Model the exact interleaving: request A has verified this snapshot, then B commits.
+	replacement, err := store.ChangePasswordAndRotate(t.Context(), user.ID, user.PasswordHash, "new-password-hash", "B", "127.0.0.1", time.Hour, now)
+	if err != nil { t.Fatal(err) }
+	for _, rehash := range []string{"", "old-password-rehash"} {
+		if _, err := store.CreateSession(t.Context(), user, rehash, replacement, "A", "127.0.0.1", time.Hour, now); !errors.Is(err, ErrCredentialsChanged) { t.Fatalf("stale login / rehash = %v", err) }
+	}
+	if _, err := store.ChangePasswordAndRotate(t.Context(), user.ID, user.PasswordHash, "stale-change", "A", "127.0.0.1", time.Hour, now); !errors.Is(err, ErrCredentialsChanged) { t.Fatalf("stale password change = %v", err) }
+	current, err := store.FindUserByID(t.Context(), user.ID)
+	if err != nil || current.PasswordHash != "new-password-hash" { t.Fatalf("new password overwritten: %v", err) }
+	if _, err := store.Authenticate(t.Context(), replacement, now, time.Hour); err != nil { t.Fatalf("replacement session lost: %v", err) }
+	var count int64
+	if err := db.Model(&Session{}).Count(&count).Error; err != nil || count != 1 { t.Fatalf("stale verification changed sessions: %d, %v", count, err) }
+	if _, err := store.CreateSession(t.Context(), current, "upgraded-current-hash", "", "current", "127.0.0.1", time.Hour, now); err != nil { t.Fatalf("current verified login rejected: %v", err) }
+	current, err = store.FindUserByID(t.Context(), user.ID)
+	if err != nil || current.PasswordHash != "upgraded-current-hash" { t.Fatalf("legitimate rehash was not applied: %v", err) }
 }
 
 func TestSessionExpiryIdleAndLastSeenThrottle(t *testing.T) {
@@ -37,7 +67,7 @@ func TestSessionExpiryIdleAndLastSeenThrottle(t *testing.T) {
 	store := NewStore(db)
 	user := authTestUser(t, store, authTestPasswords(t), "admin@example.com", "admin")
 	now := time.Unix(1_700_000_000, 0).UTC()
-	token, err := store.CreateSession(t.Context(), user.ID, "", "agent", "127.0.0.1", time.Hour, now)
+	token, err := store.CreateSession(t.Context(), user, "", "", "agent", "127.0.0.1", time.Hour, now)
 	if err != nil { t.Fatal(err) }
 	if _, err := store.Authenticate(t.Context(), token, now.Add(30*time.Second), 30*time.Minute); err != nil { t.Fatal(err) }
 	var row Session
@@ -54,7 +84,7 @@ func TestSessionExpiryIdleAndLastSeenThrottle(t *testing.T) {
 		t.Fatalf("expired session error = %v", err)
 	}
 
-	idleToken, err := store.CreateSession(t.Context(), user.ID, "", "agent", "127.0.0.1", 24*time.Hour, now)
+	idleToken, err := store.CreateSession(t.Context(), user, "", "", "agent", "127.0.0.1", 24*time.Hour, now)
 	if err != nil { t.Fatal(err) }
 	if _, err := store.Authenticate(t.Context(), idleToken, now.Add(31*time.Minute), 30*time.Minute); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("idle session error = %v", err)
@@ -67,15 +97,15 @@ func TestPasswordChangeRotatesAllSessionsAndDisableRevokes(t *testing.T) {
 	passwords := authTestPasswords(t)
 	user := authTestUser(t, store, passwords, "admin@example.com", "admin")
 	now := time.Now().UTC()
-	first, err := store.CreateSession(t.Context(), user.ID, "", "a", "1", time.Hour, now)
+	first, err := store.CreateSession(t.Context(), user, "", "", "a", "1", time.Hour, now)
 	if err != nil { t.Fatal(err) }
-	if _, err := store.CreateSession(t.Context(), user.ID, "", "b", "2", time.Hour, now); err != nil { t.Fatal(err) }
+	if _, err := store.CreateSession(t.Context(), user, "", "", "b", "2", time.Hour, now); err != nil { t.Fatal(err) }
 	permit, ok := passwords.TryAcquire()
 	if !ok { t.Fatal("permit unavailable") }
 	replacementHash, err := permit.Hash("replacement password")
 	permit.Release()
 	if err != nil { t.Fatal(err) }
-	replacement, err := store.ChangePasswordAndRotate(t.Context(), user.ID, replacementHash, "new", "3", time.Hour, now)
+	replacement, err := store.ChangePasswordAndRotate(t.Context(), user.ID, user.PasswordHash, replacementHash, "new", "3", time.Hour, now)
 	if err != nil { t.Fatal(err) }
 	if _, err := store.Authenticate(t.Context(), first, now, time.Hour); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("old session error = %v", err)

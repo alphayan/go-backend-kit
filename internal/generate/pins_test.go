@@ -3,6 +3,7 @@ package generate
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -22,6 +23,12 @@ func TestRootPostgresGatesUsePinnedImageAndRunSessionE2E(t *testing.T) {
 		if !strings.Contains(body, "run: ./scripts/session-e2e.sh") {
 			t.Errorf("%s does not run scripts/session-e2e.sh", name)
 		}
+		if !strings.Contains(body, "go test -race -timeout 30m ./...") {
+			t.Errorf("%s lacks the cross-platform test timeout", name)
+		}
+		if strings.Count(body, "pg_isready -h 127.0.0.1") != 2 {
+			t.Errorf("%s does not gate PostgreSQL on TCP readiness", name)
+		}
 		if !strings.Contains(body, "GOBACKEND_POSTGRES_SECURITY_E2E") || !strings.Contains(body, "^TestProductionPostgresSecurity$") {
 			t.Errorf("%s does not enforce the production PostgreSQL isolation/restore gate", name)
 		}
@@ -36,19 +43,46 @@ func TestRootPostgresGatesUsePinnedImageAndRunSessionE2E(t *testing.T) {
 		if !strings.Contains(string(data), "-p 127.0.0.1::5432 "+pinPostgresImage) {
 			t.Errorf("%s does not use pinned PostgreSQL image %s", name, pinPostgresImage)
 		}
+		if !strings.Contains(string(data), "pg_isready -h 127.0.0.1") {
+			t.Errorf("%s does not wait for PostgreSQL TCP readiness", name)
+		}
 	}
 }
 
-func TestReadmesInstallCurrentVersion(t *testing.T) {
+func TestAtlasScriptsUseCallerOwnershipAndTCPReadiness(t *testing.T) {
+	for _, database := range []string{"sqlite", "postgres"} {
+		data, err := os.ReadFile(filepath.Join("scaffold", "database", database, "scripts", "atlas.sh.tmpl"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), `--user "$(id -u):$(id -g)" -e HOME=/tmp`) {
+			t.Errorf("%s Atlas does not preserve caller file ownership", database)
+		}
+		if database == "postgres" && !strings.Contains(string(data), "pg_isready -h 127.0.0.1") {
+			t.Fatal("Atlas does not wait for PostgreSQL TCP readiness")
+		}
+	}
+}
+
+// The READMEs always document the source-checkout workflow. Any advertised
+// install target must be the current version; whether that version is
+// published is the CONTRIBUTING release checklist's decision, which an offline
+// test cannot verify.
+func TestReadmesInstallInstructionsAreConsistent(t *testing.T) {
 	root := filepath.Join("..", "..")
+	install := regexp.MustCompile(`go install github\.com/alphayan/go-backend-kit/cmd/gobackend@(\S+)`)
 	for _, name := range []string{"README.md", "README.zh-CN.md"} {
 		data, err := os.ReadFile(filepath.Join(root, name))
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := "go install github.com/alphayan/go-backend-kit/cmd/gobackend@" + CurrentVersion
-		if !strings.Contains(string(data), want) {
-			t.Errorf("%s does not install current version %s", name, CurrentVersion)
+		if !strings.Contains(string(data), "GOBACKEND_DEVELOPMENT_REPLACE=") {
+			t.Errorf("%s does not document the source checkout workflow", name)
+		}
+		for _, match := range install.FindAllStringSubmatch(string(data), -1) {
+			if match[1] != CurrentVersion {
+				t.Errorf("%s advertises install target %s, want %s", name, match[1], CurrentVersion)
+			}
 		}
 	}
 }

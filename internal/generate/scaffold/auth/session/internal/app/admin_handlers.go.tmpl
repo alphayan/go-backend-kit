@@ -35,7 +35,7 @@ func (h *authHandler) listUsers(c *echo.Context) error {
 	page, size, err := httpx.ParsePage(c.QueryParam("page"), c.QueryParam("page_size"))
 	if err != nil { return httpx.WriteError(c, err) }
 	email := strings.ToLower(strings.TrimSpace(c.QueryParam("email")))
-	if email != "" && !validEmail(email) { return httpx.WriteError(c, apperror.BadRequest("invalid_email", "email must be a valid address")) }
+	if email != "" && !auth.ValidEmail(email) { return httpx.WriteError(c, apperror.BadRequest("invalid_email", "email must be a valid address")) }
 	users, total, err := h.store.ListUsers(c.Request().Context(), email, page, size)
 	if err != nil { return adminError(c, err) }
 	return httpx.WriteData(c, http.StatusOK, httpx.NewPage(users, page, size, total))
@@ -49,7 +49,7 @@ func (h *authHandler) createUser(c *echo.Context) error {
 	}
 	if err := httpx.DecodeJSON(c.Request().Body, &input); err != nil { return httpx.WriteError(c, apperror.BadRequest("invalid_json", "request body must be valid JSON")) }
 	input.Email = strings.ToLower(strings.TrimSpace(input.Email))
-	if !validEmail(input.Email) || len(input.Password) < 12 || len(input.Password) > 1024 || (input.Role != "admin" && input.Role != "viewer") {
+	if !auth.ValidEmail(input.Email) || !auth.ValidNewPassword(input.Password) || (input.Role != "admin" && input.Role != "viewer") {
 		return httpx.WriteError(c, apperror.BadRequest("invalid_user", "provide a valid email, a password of 12 to 1024 bytes, and an admin or viewer role"))
 	}
 	identity, _ := auth.IdentityFromContext(c.Request().Context())

@@ -3,6 +3,7 @@ package auth
 import (
 	"container/list"
 	"context"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -39,7 +40,7 @@ func NewLoginLimiter(store *Store, limit int, window time.Duration) *LoginLimite
 // An empty email consumes only the IP budget (logout).
 func (l *LoginLimiter) Allow(ctx context.Context, ip, email string, now time.Time) (bool, error) {
 	if err := ctx.Err(); err != nil { return false, err }
-	ip, email = strings.TrimSpace(ip), normalizeEmail(email)
+	ip, email = loginIPKey(ip), normalizeEmail(email)
 {{if .Options.IsPostgres}}	if l.store.db.Dialector.Name() == "postgres" {
 		return l.allowShared(ctx, ip, email)
 	}
@@ -56,6 +57,17 @@ func (l *LoginLimiter) ClearEmail(ctx context.Context, email string) error {
 	}
 {{end}}	l.email.Delete(email)
 	return nil
+}
+
+func loginIPKey(raw string) string {
+	ip, err := netip.ParseAddr(strings.Trim(strings.TrimSpace(raw), "[]"))
+	if err != nil { return "invalid" }
+	ip = ip.Unmap().WithZone("")
+	if ip.Is6() {
+		// ponytail: one /64 shares a budget; larger botnets still require edge controls.
+		return netip.PrefixFrom(ip, 64).Masked().String()
+	}
+	return ip.String()
 }
 
 type rateEntry struct {

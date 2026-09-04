@@ -177,7 +177,6 @@ func jwtScaffoldFiles() []scaffoldFile {
 func sessionScaffoldFiles(opts ProjectOptions) []scaffoldFile {
 	files := mapScaffold("auth/session/",
 		"auth/session/.node-version.tmpl",
-		"auth/session/.npmrc.tmpl",
 		"auth/session/package.json.tmpl",
 		"auth/session/pnpm-lock.yaml.tmpl",
 		"auth/session/pnpm-workspace.yaml.tmpl",
@@ -226,6 +225,7 @@ func sessionScaffoldFiles(opts ProjectOptions) []scaffoldFile {
 		"auth/session/internal/platform/auth/session_test.go.tmpl",
 		"auth/session/internal/platform/auth/store.go.tmpl",
 		"auth/session/internal/platform/auth/store_test.go.tmpl",
+		"auth/session/internal/platform/config/session_test.go.tmpl",
 		"auth/session/internal/platform/audit/audit.go.tmpl",
 		"auth/session/internal/platform/audit/audit_test.go.tmpl",
 		"auth/session/internal/platform/rbac/rbac.go.tmpl",
@@ -244,6 +244,18 @@ func sessionScaffoldFiles(opts ProjectOptions) []scaffoldFile {
 		)...)
 	}
 	return files
+}
+
+// Scaffold outputs that older generator versions produced for this selection
+// and that no longer exist. Upgrade removes an unmodified copy, reports a
+// modified copy as a conflict, and still accepts baselines that record them.
+func retiredScaffoldPaths(opts ProjectOptions) map[string]bool {
+	retired := map[string]bool{}
+	if opts.HasSession() {
+		// pnpm 11 ignores its settings in .npmrc; they moved to pnpm-workspace.yaml.
+		retired[".npmrc"] = true
+	}
+	return retired
 }
 
 func mapScaffold(prefix string, sources ...string) []scaffoldFile {

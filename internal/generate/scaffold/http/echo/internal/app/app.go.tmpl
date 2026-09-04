@@ -27,7 +27,13 @@ import (
 )
 
 func New(cfg config.Config, db *gorm.DB, logger *slog.Logger{{if .Options.IsProduction}}, metrics *observability.Metrics{{end}}{{if .Options.HasJWT}}, verifier *auth.Verifier{{end}}{{if .Options.HasSession}}, authStore *auth.Store, passwords *auth.PasswordManager{{end}}{{if .Options.HasRedis}}, redisClient *redis.Client{{end}}{{if .Options.HasNATS}}, natsConn *nats.Conn{{end}}) *echo.Echo {
-	e := echo.NewWithConfig(echo.Config{Logger: logger})
+	echoConfig := echo.Config{Logger: logger}
+{{if .Options.HasSession}}	if len(cfg.TrustedProxyCIDRs) > 0 {
+		trust := []echo.TrustOption{echo.TrustLoopback(false), echo.TrustLinkLocal(false), echo.TrustPrivateNet(false)}
+		for _, network := range cfg.TrustedProxyCIDRs { trust = append(trust, echo.TrustIPRange(network)) }
+		echoConfig.IPExtractor = echo.ExtractIPFromXFFHeader(trust...)
+	}
+{{end}}	e := echo.NewWithConfig(echoConfig)
 	e.HTTPErrorHandler = func(c *echo.Context, err error) { _ = httpx.WriteError(c, err) }
 	e.Use(middleware.RequestID())
 	e.Use(middleware.Recover())

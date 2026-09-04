@@ -36,7 +36,7 @@ go tool gobackend check
 
 请提交 `.gobackend-scaffold.json`，它独立于资源生成记录原始脚手架摘要。在本目录用新版 `gobackend upgrade` 预览，审查后再运行 `gobackend upgrade --apply`。冲突会阻止整批应用；对照报告目录中的 `candidate/` 手工合并，再用 `--keep` 明确确认各个已解决的脚手架路径。没有基线的旧项目需要 `--baseline` 指向经核验的原始项目（相同 module/provider/资源定义），不能拿当前已改动项目冒充原始基线。
 
-私有且 gitignore 的 `.gobackend/upgrade-*` 保存 `plan.json`、`candidate/` 和 `before/` 原文件备份。应用期间不要编辑或部署。写入失败会尽可能回滚，崩溃仍可能留下部分升级，重跑/恢复前需核对计划和备份。不会修改真实 `.env`、迁移或资源定义，不会切换 provider、执行数据库迁移或部署。完成后运行模块整理、生成/check、race/vet/漏洞检查{{if .Options.HasSession}}、冻结 pnpm 安装和前端/浏览器测试{{end}}，并显式审查/应用需要的数据库迁移。保留恢复目录直到验收完成。
+私有且 gitignore 的 `.gobackend/upgrade-*` 保存 `plan.json`、`candidate/` 和 `before/` 原文件备份。应用期间不要编辑或部署。写入失败会尽可能回滚，崩溃仍可能留下部分升级，重跑/恢复前需核对计划和备份。新版本不再提供的脚手架文件只在仍与记录的上游摘要一致时才会删除，并先备份；已被修改的副本视为冲突，可用 `--keep` 保留。不会修改真实 `.env`、迁移或资源定义，不会切换 provider、执行数据库迁移或部署。完成后运行模块整理、生成/check、race/vet/漏洞检查{{if .Options.HasSession}}、冻结 pnpm 安装和前端/浏览器测试{{end}}，并显式审查/应用需要的数据库迁移。保留恢复目录直到验收完成。
 
 ## 数据库与迁移
 {{if .Options.IsSQLite}}
@@ -102,11 +102,11 @@ openssl rand -base64 32
 
 SQLite 单元测试通过仅用于测试的 `AutoMigrate` 创建相同认证模型，不依赖 Docker。AutoMigrate 与 Atlas 独立生成 DDL：单元测试通过不代表审查后的迁移能够应用、或与模型 schema 一致。必须保留一次性数据库上的 Atlas apply/schema-diff 独立验收；PostgreSQL 集成测试需要已经显式迁移的一次性数据库。
 
-当 `auth_users` 为空时，若没有同时设置 `AUTH_BOOTSTRAP_EMAIL` 与 `AUTH_BOOTSTRAP_PASSWORD`，启动会拒绝。请使用唯一的引导密码；首次成功启动后删除这两个变量，并立即通过 `/auth/password` 换密。已有任意用户时，后续启动会忽略仍存在的引导变量并告警。
+当 `auth_users` 为空时，若没有同时设置 `AUTH_BOOTSTRAP_EMAIL` 与 `AUTH_BOOTSTRAP_PASSWORD`，启动会拒绝。邮箱必须合法，引导密码为 12–1024 字节，不合法时在创建用户前拒绝。请使用唯一的引导密码；首次成功启动后删除这两个变量，并立即通过 `/auth/password` 换密。已有任意用户时，后续启动会忽略仍存在的引导变量并告警。
 
 密码存储编码刻意不带前导 `$`：`argon2id$v=19$m=<KiB>,t=<passes>,p=<lanes>$<salt>$<digest>`，以及旧格式 `pbkdf2-sha256$i=<iterations>$<salt>$<digest>`。盐为 16 字节、摘要为 32 字节，使用不带 padding 的标准 Base64。Argon2id 格式接近 PHC，但不是标准 PHC，不能直接交给现成 PHC 解码器。不得静默补上前导 `$` 或更改解析规则；格式变更必须通过明确的兼容/迁移方案保留存量哈希的可用性。
 
-密码默认使用 Argon2id `m=19456,t=2,p=1`；已有 PBKDF2-SHA256 哈希可作为文档化的 FIPS 迁移路径读取。应在部署主机上把 Argon2id 调到约 100–300ms。活跃 Argon2 工作缓冲区约为 `存量哈希内存参数 × AUTH_PASSWORD_HASH_CONCURRENCY`：默认四个槽位处理默认哈希时为 76 MiB；若存量哈希使用允许的 64 MiB 参数上限，则为 256 MiB。这不是进程 RSS 上限，尚未回收的分配、其他业务和运行时开销都需要额外余量。每个进程的 KDF 并发已封顶，满载时不排队而立即返回 429。登录/注销扣减 IP 额度；登录还会在 KDF 前预占邮箱次数（包括未知账号和哈希满载的请求），邮箱额度为 `AUTH_LOGIN_RATE_LIMIT` 的三倍，凭据验证成功后清零。预占可防止并发失败请求超额。IP 键来自 Echo `RealIP`；只有可信反向代理才能配置 `IPExtractor`，否则转发头可伪造；代理后未配置时所有客户端会挤在代理的同一桶中。
+密码默认使用 Argon2id `m=19456,t=2,p=1`；已有 PBKDF2-SHA256 哈希可作为文档化的 FIPS 迁移路径读取。应在部署主机上把 Argon2id 调到约 100–300ms。活跃 Argon2 工作缓冲区约为 `存量哈希内存参数 × AUTH_PASSWORD_HASH_CONCURRENCY`：默认四个槽位处理默认哈希时为 76 MiB；若存量哈希使用允许的 64 MiB 参数上限，则为 256 MiB。这不是进程 RSS 上限，尚未回收的分配、其他业务和运行时开销都需要额外余量。每个进程的 KDF 并发已封顶，满载时不排队而立即返回 429。登录/注销扣减 IP 额度；登录还会在 KDF 前预占邮箱次数（包括未知账号和哈希满载的请求），邮箱额度为 `AUTH_LOGIN_RATE_LIMIT` 的三倍，凭据验证成功后清零。预占可防止并发失败请求超额。IP 键来自 Echo `RealIP`。通过 `HTTP_TRUSTED_PROXY_CIDRS` 配置实际代理节点的 CIDR（逗号分隔；宿主机本地代理例如 `127.0.0.1/32`），不得信任客户端网段或所有地址。只信任这些节点提供的 `X-Forwarded-For`，不会默认信任私网、链路本地或回环网段。为空时按直连 IP 处理，生产启动会告警；代理后仍会共用代理额度。代理必须正确覆盖/追加真实客户端 IP，API 不得绕过该拓扑暴露公网。IPv4-mapped 与 IPv4 共用额度；IPv6 按 /64 合桶，同子网合法用户也共用额度；非法地址共用一个兜底桶。大量分布式来源仍可能耗尽容量，需要边缘限流与目标拓扑压测。IP 键语义变更时应排空旧实例，混跑旧、新二进制不能保证统一额度。
 
 部署主机上的可复现命令：`GOGC=100 GOMEMLIMIT=2GiB go test ./internal/platform/auth -run='^$' -bench='^BenchmarkPassword$' -benchmem -benchtime=1s -count=10 -cpu=1,4`。基准包含 Argon2id 哈希/验证、600,000 次迭代的旧 PBKDF2-SHA256 验证，各有串行与 `RunParallel` 两种负载；仅使用虚构口令，不访问数据库。应连同原始输出记录硬件、工具链、参数和 GC 设置，再用 benchstat 或等价统计比较重复样本。并行 `ns/op` 是总墙钟除以完成次数，不是单次登录延迟；`B/op` 是分配量，不是峰值存活内存或 RSS。`-race` 应另跑。这些数字不含 HTTP、数据库、KDF 准入/拒绝或登录后的重哈希，不能推导算法强弱或生产 SLO。Go 内存限制只是 GC 软目标，不是硬安全上限；按目标机器容量选择 CPU/并发和内存预算。
 
@@ -121,6 +121,8 @@ SQLite 单元测试通过仅用于测试的 `AutoMigrate` 创建相同认证模�
 使用 `make frontend-install`、`make frontend-typecheck`、`make frontend-test` 和 `make frontend-build`。`make frontend-dev` 启动 Vite，并把 `/auth` 与 `/api` 代理到 Go 服务，从而保持 Session 的同源边界。生产构建先编译 `web/dist`，再由 Go 二进制内嵌；Node.js 和 pnpm 不是运行依赖。
 
 `net/http.CrossOriginProtection` 全局生效。安全方法、`Sec-Fetch-Site: same-origin`/`none`、同时没有 `Sec-Fetch-Site` 与 `Origin` 的请求，以及 Origin 主机与 Host 相同的请求会放行；后两项是明确记录的 fail-open 边界。CORS 允许读取响应并不豁免跨站写。生成的 Vite 服务把浏览器 API 流量代理到 Go 服务，生产二进制不会信任 Vite origin；任何 GET 都不得改状态。
+
+429 拒绝复用现有结构化请求日志（`status=429`），不再 INSERT 审计表；生产指标只统计 4xx 分类，不区分拒绝原因。成功/失败认证与业务审计仍保留。登录最终化与改密在数据库事务内复核已验证的密码哈希；过期快照返回 401，需使用当前凭据重试。
 
 资源变更提交后才尽力写审计；审计失败只记录错误，不改变已经提交的业务响应，因此进程在该窗口崩溃可能丢一条审计。审计绝不保存请求体、密码、token 或 Cookie 值。`AUTH_AUDIT_RETENTION_DAYS=0` 默认保留所有事件；明确设置正整数后，每小时分批删除超过天数的记录，每批 1,000 条、每小时最多 100,000 条。开启前应先归档需要保留的证据。
 
@@ -142,7 +144,7 @@ SQLite 单元测试通过仅用于测试的 `AutoMigrate` 创建相同认证模�
 {{end}}
     make up
 
-生产档通过 Docker Compose 启动 API、Prometheus 和 Grafana。日常可使用 make logs、make down、make compose-config（静默验证，不打印秘密）。API 地址是 http://localhost:8080，Prometheus 是 http://localhost:9090，Grafana 是 http://localhost:3000。对外分享前请修改 .env 中的 GRAFANA_ADMIN_PASSWORD。
+生产档通过 Docker Compose 启动 API、Prometheus 和 Grafana。日常可使用 make logs、make down、make compose-config（静默验证，不打印秘密）。API 地址是 http://localhost:8080，Prometheus 是 http://localhost:9090，Grafana 是 http://localhost:3000。对外分享前请修改 .env 中的 GRAFANA_ADMIN_PASSWORD。`/metrics` 刻意不鉴权，供私有网络的 Prometheus 抓取；所有公网反向代理必须拦截 `/metrics`，API/抓取网络必须保持私有。Compose 的回环绑定不代表经过代理后仍不对外暴露。
 {{else}}
 ## 启动
 

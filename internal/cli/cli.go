@@ -3,6 +3,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/alphayan/go-backend-kit/internal/generate"
 	"github.com/spf13/cobra"
+	"golang.org/x/mod/semver"
 )
 
 type BuildInfo struct {
@@ -20,6 +22,9 @@ type BuildInfo struct {
 }
 
 func New(info BuildInfo, stdout, stderr io.Writer) *cobra.Command {
+	if build, ok := debug.ReadBuildInfo(); ok {
+		info.Version = buildVersion(info.Version, build.Main.Version, vcsModified(build))
+	}
 	if info.Version == "" {
 		info.Version = "devel"
 	}
@@ -65,11 +70,15 @@ func newCommand(info BuildInfo) *cobra.Command {
 	registerChoiceFlag(command, "auth", &authChoice, string(generate.AuthNone), "authentication", generate.AuthChoices())
 	registerChoiceFlag(command, "profile", &profileChoice, string(generate.ProfilePersonal), "project profile", []string{"personal", "production"})
 	command.RunE = func(cmd *cobra.Command, args []string) error {
+		generator, err := scaffoldGenerator(info)
+		if err != nil {
+			return err
+		}
 		database := generate.DatabaseChoice(databaseChoice)
 		if profileChoice == string(generate.ProfileProduction) && !cmd.Flags().Changed("database") {
 			database = generate.DatabasePostgres
 		}
-		return (generate.Generator{Version: releaseVersion(info.Version), DevelopmentReplace: os.Getenv("GOBACKEND_DEVELOPMENT_REPLACE")}).New(cmd.Context(), args[0], modulePath, generate.ProjectOptions{
+		return generator.New(cmd.Context(), args[0], modulePath, generate.ProjectOptions{
 			HTTP:      generate.HTTPChoice(httpChoice),
 			Database:  database,
 			Cache:     generate.CacheChoice(cacheChoice),
@@ -127,7 +136,11 @@ func upgradeCommand(info BuildInfo) *cobra.Command {
 		Short: "Preview scaffold upgrades; apply explicitly after reviewing conflicts",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			report, err := (generate.Generator{Version: releaseVersion(info.Version), DevelopmentReplace: os.Getenv("GOBACKEND_DEVELOPMENT_REPLACE")}).Upgrade(cmd.Context(), ".", options)
+			generator, err := scaffoldGenerator(info)
+			if err != nil {
+				return err
+			}
+			report, err := generator.Upgrade(cmd.Context(), ".", options)
 			for _, change := range report.Changes {
 				if _, writeErr := fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\n", change.Action, change.Path); writeErr != nil {
 					return writeErr
@@ -199,4 +212,33 @@ func releaseVersion(version string) string {
 		return generate.CurrentVersion
 	}
 	return version
+}
+
+// go install @<tag|pushed commit> records a usable module version without
+// ldflags. A build from a modified checkout (vcs.modified, "+dirty") is a source
+// build: its stamped version names a different, already-published commit.
+func buildVersion(explicit, module string, modified bool) string {
+	if explicit == "" || explicit == "devel" || explicit == "(devel)" {
+		if semver.IsValid(module) && semver.Build(module) == "" && !modified {
+			return module
+		}
+	}
+	return explicit
+}
+
+func vcsModified(build *debug.BuildInfo) bool {
+	for _, setting := range build.Settings {
+		if setting.Key == "vcs.modified" {
+			return setting.Value == "true"
+		}
+	}
+	return false
+}
+
+func scaffoldGenerator(info BuildInfo) (generate.Generator, error) {
+	replace := os.Getenv("GOBACKEND_DEVELOPMENT_REPLACE")
+	if !semver.IsValid(info.Version) && replace == "" {
+		return generate.Generator{}, errors.New("this generator was built from source or a modified checkout; set GOBACKEND_DEVELOPMENT_REPLACE=/absolute/path/to/go-backend-kit, or install a published tag or pushed commit with go install")
+	}
+	return generate.Generator{Version: releaseVersion(info.Version), DevelopmentReplace: replace}, nil
 }

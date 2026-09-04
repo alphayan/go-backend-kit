@@ -26,7 +26,7 @@ jobs:
         if: runner.os == 'Linux'
         run: test -z "$(gofmt -l .)"
       - name: Unit and generated-project tests
-        run: go test -race ./...
+        run: go test -race -timeout 30m ./...
       - name: Vet
         run: go vet ./...
       - name: Vulnerability scan
@@ -45,7 +45,7 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U kit -d kit_test"
+          --health-cmd "pg_isready -h 127.0.0.1 -U kit -d kit_test"
           --health-interval 2s
           --health-timeout 3s
           --health-retries 20
@@ -72,7 +72,7 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U kit -d kit_session_test"
+          --health-cmd "pg_isready -h 127.0.0.1 -U kit -d kit_session_test"
           --health-interval 2s
           --health-timeout 3s
           --health-retries 20
@@ -117,5 +117,7 @@ jobs:
           cache: true
       - name: Generated Session frontend verification
         run: ./scripts/frontend-e2e.sh
+      - name: Isolated Docker regressions (Atlas ownership, Grafana boot)
+        run: GOBACKEND_DOCKER_E2E=1 go test ./internal/generate -run '^Test(AtlasSQLiteFileOwnership|ProductionGrafanaBootsWithGeneratedProvisioning)$' -count=1
       - name: Production Session TLS browser boundaries
         run: ./scripts/frontend-e2e.sh production

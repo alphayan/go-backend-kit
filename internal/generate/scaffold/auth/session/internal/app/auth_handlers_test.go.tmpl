@@ -3,8 +3,10 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -73,7 +75,7 @@ func TestSessionPasswordChangeAndLoginRotation(t *testing.T) {
 {{if .Options.IsProduction}}	metrics := observability.New(nil)
 {{end}}	e := New(cfg, db, logger{{if .Options.IsProduction}}, metrics{{end}}, store, passwords)
 
-	fixationToken, err := store.CreateSession(t.Context(), user.ID, "", "old browser", "127.0.0.1", time.Hour, time.Now().UTC())
+	fixationToken, err := store.CreateSession(t.Context(), user, "", "", "old browser", "127.0.0.1", time.Hour, time.Now().UTC())
 	if err != nil { t.Fatal(err) }
 	login := sessionRequest(e, http.MethodPost, "/auth/login", map[string]string{
 		"email": user.Email, "password": "correct horse battery staple",
@@ -89,7 +91,7 @@ func TestSessionPasswordChangeAndLoginRotation(t *testing.T) {
 		t.Fatalf("fixation token status = %d, body = %s", stale.Code, stale.Body.String())
 	}
 
-	otherToken, err := store.CreateSession(t.Context(), user.ID, "", "other browser", "127.0.0.2", time.Hour, time.Now().UTC())
+	otherToken, err := store.CreateSession(t.Context(), user, "", "", "other browser", "127.0.0.2", time.Hour, time.Now().UTC())
 	if err != nil { t.Fatal(err) }
 	wrong := sessionRequest(e, http.MethodPost, "/auth/password", map[string]string{
 		"current_password": "wrong password", "new_password": "replacement password",
@@ -157,7 +159,7 @@ func TestSessionLogoutIsIdempotentAndAlwaysClearsCookie(t *testing.T) {
 	cfg := sessionTestConfig()
 {{if .Options.IsProduction}}	metrics := observability.New(nil)
 {{end}}	e := New(cfg, db, logger{{if .Options.IsProduction}}, metrics{{end}}, store, passwords)
-	expiredToken, err := store.CreateSession(t.Context(), user.ID, "", "expired browser", "127.0.0.1", -time.Minute, time.Now().UTC())
+	expiredToken, err := store.CreateSession(t.Context(), user, "", "", "expired browser", "127.0.0.1", -time.Minute, time.Now().UTC())
 	if err != nil { t.Fatal(err) }
 
 	for name, cookie := range map[string]*http.Cookie{
@@ -184,7 +186,7 @@ func TestSessionResourceAuditFailureDoesNotChangeSuccessfulResponse(t *testing.T
 	passwords := sessionTestPasswords(t)
 	store := auth.NewStore(db)
 	admin := createSessionTestUser(t, store, passwords, "admin@example.com", "admin", "correct horse battery staple")
-	token, err := store.CreateSession(t.Context(), admin.ID, "", "test", "127.0.0.1", time.Hour, time.Now().UTC())
+	token, err := store.CreateSession(t.Context(), admin, "", "", "test", "127.0.0.1", time.Hour, time.Now().UTC())
 	if err != nil { t.Fatal(err) }
 
 	generated.RoutePermissions["POST /api/v1/sample"] = "sample.create"
@@ -252,9 +254,9 @@ func TestSessionPermissionCrossOriginAndAudit(t *testing.T) {
 	admin := createSessionTestUser(t, store, passwords, "admin@example.com", "admin", "correct horse battery staple")
 	viewer := createSessionTestUser(t, store, passwords, "viewer@example.com", "viewer", "correct horse battery staple")
 	now := time.Now().UTC()
-	adminToken, err := store.CreateSession(t.Context(), admin.ID, "", "test", "127.0.0.1", time.Hour, now)
+	adminToken, err := store.CreateSession(t.Context(), admin, "", "", "test", "127.0.0.1", time.Hour, now)
 	if err != nil { t.Fatal(err) }
-	viewerToken, err := store.CreateSession(t.Context(), viewer.ID, "", "test", "127.0.0.2", time.Hour, now)
+	viewerToken, err := store.CreateSession(t.Context(), viewer, "", "", "test", "127.0.0.2", time.Hour, now)
 	if err != nil { t.Fatal(err) }
 
 	generated.RoutePermissions["GET /api/v1/sample"] = "sample.read"
@@ -331,9 +333,10 @@ func TestSessionPermissionCrossOriginAndAudit(t *testing.T) {
 	}
 }
 
-func TestSessionRateAndHashCapacityFailuresAreAudited(t *testing.T) {
+func TestSessionRateAndHashCapacityFailuresDoNotAmplifyAuditWrites(t *testing.T) {
 	db := sessionTestDB(t)
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	passwords, err := auth.NewPasswordManager(auth.DefaultPasswordParams(), 1)
 	if err != nil { t.Fatal(err) }
 	store := auth.NewStore(db)
@@ -343,8 +346,12 @@ func TestSessionRateAndHashCapacityFailuresAreAudited(t *testing.T) {
 	e := New(cfg, db, logger{{if .Options.IsProduction}}, observability.New(nil){{end}}, store, passwords)
 	first := sessionRequest(e, http.MethodPost, "/auth/login", map[string]string{"email": "missing@example.com", "password": "wrong"}, nil, nil)
 	if first.Code != http.StatusUnauthorized { t.Fatalf("first login status = %d", first.Code) }
-	second := sessionRequest(e, http.MethodPost, "/auth/login", map[string]string{"email": "missing@example.com", "password": "wrong"}, nil, nil)
-	if second.Code != http.StatusTooManyRequests { t.Fatalf("limited login status = %d", second.Code) }
+	for range 50 {
+		for _, path := range []string{"/auth/login", "/auth/logout"} {
+			response := sessionRequest(e, http.MethodPost, path, map[string]string{"email": "missing@example.com", "password": "wrong"}, nil, nil)
+			if response.Code != http.StatusTooManyRequests { t.Fatalf("limited %s status = %d", path, response.Code) }
+		}
+	}
 
 	hashCfg := sessionTestConfig()
 	hashApp := New(hashCfg, db, logger{{if .Options.IsProduction}}, observability.New(nil){{end}}, store, passwords)
@@ -357,9 +364,57 @@ func TestSessionRateAndHashCapacityFailuresAreAudited(t *testing.T) {
 	var rateRows, capacityRows int64
 	if err := db.Model(&auth.AuditLog{}).Where("action = ?", "rate_limit").Count(&rateRows).Error; err != nil { t.Fatal(err) }
 	if err := db.Model(&auth.AuditLog{}).Where("action = ?", "hash_capacity").Count(&capacityRows).Error; err != nil { t.Fatal(err) }
-	if rateRows != 1 || capacityRows != 1 {
+	if rateRows != 0 || capacityRows != 0 {
 		t.Fatalf("rate/hash audit rows = %d/%d", rateRows, capacityRows)
 	}
+	var total int64
+	if err := db.Model(&auth.AuditLog{}).Count(&total).Error; err != nil || total != 1 { t.Fatalf("rejections added audit rows: %d, %v", total, err) }
+	if strings.Count(logs.String(), "status=429") != 101 { t.Fatal("429 request logs were lost") }
+}
+
+func TestSessionTrustedProxyClientIPs(t *testing.T) {
+	db := sessionTestDB(t)
+	store, passwords := auth.NewStore(db), sessionTestPasswords(t)
+	createSessionTestUser(t, store, passwords, "admin@example.com", "admin", "correct horse battery staple")
+	cfg := sessionTestConfig()
+	cfg.AuthLoginRateLimit = 2
+	_, network, _ := net.ParseCIDR("127.0.0.1/32")
+	cfg.TrustedProxyCIDRs = []*net.IPNet{network}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	e := New(cfg, db, logger{{if .Options.IsProduction}}, observability.New(nil){{end}}, store, passwords)
+	for _, test := range []struct{ remote string; forwarded []string; want string }{
+		{"127.0.0.1:1234", []string{"198.51.100.1"}, "198.51.100.1"},
+		{"127.0.0.1:1234", []string{"203.0.113.9", "198.51.100.1"}, "198.51.100.1"},
+		{"127.0.0.1:1234", []string{"203.0.113.9, 10.0.0.1"}, "10.0.0.1"},
+		{"10.0.0.1:1234", []string{"203.0.113.9"}, "10.0.0.1"},
+		{"198.51.100.1:1234", []string{"203.0.113.9"}, "198.51.100.1"},
+		{"127.0.0.1:1234", []string{"[2001:db8::1]"}, "2001:db8::1"},
+		{"127.0.0.1:1234", []string{"::ffff:192.0.2.1"}, "192.0.2.1"},
+		{"127.0.0.1:1234", []string{"203.0.113.9, unknown"}, "127.0.0.1"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+		req.RemoteAddr, req.Header["X-Forwarded-For"] = test.remote, test.forwarded
+		if got := e.IPExtractor(req); got != test.want { t.Fatalf("proxy %s %v = %q, want %q", test.remote, test.forwarded, got, test.want) }
+	}
+	request := func(ip, path string) int {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"email":"admin@example.com","password":"correct horse battery staple"}`))
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Forwarded-For", ip)
+		response := httptest.NewRecorder()
+		e.ServeHTTP(response, req)
+		return response.Code
+	}
+	for i := range 6 {
+		if got := request(fmt.Sprintf("198.51.100.%d", i+1), "/auth/login"); got != http.StatusOK { t.Fatalf("distinct proxied client %d: %d", i, got) }
+	}
+	if request("198.51.100.1", "/auth/login") != http.StatusOK || request("198.51.100.1", "/auth/logout") != http.StatusTooManyRequests { t.Fatal("same client's budget was not enforced") }
+	if request("198.51.100.7", "/auth/logout") != http.StatusNoContent { t.Fatal("unrelated client was globally limited") }
+	var rows int64
+	if err := db.Model(&auth.Session{}).Where("ip = ?", "198.51.100.6").Count(&rows).Error; err != nil || rows != 1 { t.Fatalf("session client IP not recorded: %d, %v", rows, err) }
+	cfg.TrustedProxyCIDRs = nil
+	direct := New(cfg, db, logger{{if .Options.IsProduction}}, observability.New(nil){{end}}, store, passwords)
+	if direct.IPExtractor != nil { t.Fatal("default mode must not trust forwarded IP headers") }
 }
 
 func TestSessionDatabaseFailureIsInternalError(t *testing.T) {

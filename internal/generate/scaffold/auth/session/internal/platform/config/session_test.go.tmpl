@@ -1,0 +1,31 @@
+package config
+
+import (
+	"net"
+	"strings"
+	"testing"
+)
+
+func TestTrustedProxyCIDRs(t *testing.T) {
+	loadProxies := func(raw string) (Config, error) {
+		return load(func(key string) string {
+			switch key {
+			case "HTTP_TRUSTED_PROXY_CIDRS": return raw
+			case "DATABASE_URL": return "postgres://example"
+			case "REDIS_URL": return "redis://127.0.0.1:6379/0"
+			case "NATS_URL": return "nats://127.0.0.1:4222"
+			default: return ""
+			}
+		})
+	}
+	for _, raw := range []string{"127.0.0.1", "invalid/24", "127.0.0.1/32,", "0.0.0.0/0", "::/0", "::ffff:0.0.0.0/96", "::ffff:0:0/96"} {
+		if _, err := loadProxies(raw); err == nil || !strings.Contains(err.Error(), "HTTP_TRUSTED_PROXY_CIDRS") { t.Fatalf("invalid proxy config %q: %v", raw, err) }
+	}
+	cfg, err := loadProxies("127.0.0.1/32, 2001:db8:ffff::/64")
+	if err != nil || len(cfg.TrustedProxyCIDRs) != 2 { t.Fatalf("valid CIDRs: %v", err) }
+	cfg, err = loadProxies("::ffff:192.0.2.1/128")
+	if err != nil || len(cfg.TrustedProxyCIDRs) != 1 || !cfg.TrustedProxyCIDRs[0].Contains(net.ParseIP("192.0.2.1")) || cfg.TrustedProxyCIDRs[0].Contains(net.ParseIP("192.0.2.2")) { t.Fatalf("exact mapped proxy: %v", err) }
+	cfg, err = loadProxies("")
+	if err != nil || len(cfg.TrustedProxyCIDRs) != 0 { t.Fatalf("direct mode: %v", err) }
+{{if .Options.IsProduction}}	if !strings.Contains(strings.Join(cfg.Warnings, " "), "HTTP_TRUSTED_PROXY_CIDRS") { t.Fatal("production missing proxy warning") }
+{{end}}}
