@@ -2,7 +2,7 @@ import { readonly, ref } from "vue"
 import { APIError, apiRequest } from "./api"
 
 export interface Identity {
-  id: number
+  id: number | bigint
   email: string
   role: "admin" | "viewer" | string
 }

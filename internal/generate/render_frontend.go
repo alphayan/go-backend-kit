@@ -26,7 +26,7 @@ func renderFrontendResource(resource spec.Resource) ([]byte, error) {
 	var output bytes.Buffer
 	fmt.Fprintf(&output, "// %s\n\n", generatedMarker)
 	output.WriteString("import { z } from \"zod\"\n")
-	output.WriteString("import { dateTimeSchema, decimalSchema, jsonSchema, numberSchema } from \"@/lib/forms\"\n")
+	output.WriteString("import { dateTimeSchema, decimalSchema, int64Schema, jsonSchema, numberSchema } from \"@/lib/forms\"\n")
 	output.WriteString("import type { FieldDefinition, ResourceDefinition } from \"@/lib/resource\"\n\n")
 
 	identifier := resource.Package
@@ -80,8 +80,17 @@ func frontendSchema(field spec.Field) string {
 		}
 	case spec.TypeBool:
 		schema = "z.boolean()"
-	case spec.TypeInt32, spec.TypeInt64:
+	case spec.TypeInt32:
 		schema = fmt.Sprintf("numberSchema(true, %s, %s)", frontendNumber(field.Min), frontendNumber(field.Max))
+	case spec.TypeInt64:
+		minimum, maximum := "undefined", "undefined"
+		if field.Min != nil {
+			minimum = mustFrontendJSON(field.Min.Decimal().Ceil().String())
+		}
+		if field.Max != nil {
+			maximum = mustFrontendJSON(field.Max.Decimal().Floor().String())
+		}
+		schema = fmt.Sprintf("int64Schema(%s, %s)", minimum, maximum)
 	case spec.TypeFloat64:
 		schema = fmt.Sprintf("numberSchema(false, %s, %s)", frontendNumber(field.Min), frontendNumber(field.Max))
 	case spec.TypeDecimal:
@@ -132,6 +141,13 @@ func frontendFields(fields []spec.Field) []map[string]any {
 		}
 		if field.HasDefault {
 			value["defaultValue"] = field.Default
+			if field.Type == spec.TypeInt64 && field.Default != nil {
+				value["defaultValue"] = fmt.Sprint(field.Default)
+			}
+			if field.Type == spec.TypeJSON {
+				// Keep JSON defaults as text until submission so JS cannot round literals.
+				value["defaultValue"] = mustFrontendJSON(field.Default)
+			}
 		}
 		if field.Min != nil {
 			value["min"] = field.Min.String()

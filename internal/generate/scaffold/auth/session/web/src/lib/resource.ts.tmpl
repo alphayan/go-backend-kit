@@ -1,4 +1,5 @@
 import type { z } from "zod"
+import { stringifyJSON } from "./api"
 
 export type FieldKind = "string" | "text" | "bool" | "int32" | "int64" | "float64" | "decimal" | "time" | "uuid" | "json"
 
@@ -38,7 +39,7 @@ export interface ResourceDefinition {
 }
 
 export type ResourceRecord = Record<string, unknown> & {
-  id: number
+  id: number | bigint
   created_at: string
   updated_at: string
 }
@@ -54,6 +55,6 @@ export function formatCell(value: unknown, kind: ColumnDefinition["kind"]): stri
     const date = new Date(String(value))
     return Number.isNaN(date.valueOf()) ? String(value) : new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date)
   }
-  if (kind === "json") return JSON.stringify(value)
+  if (kind === "json") return stringifyJSON(value)
   return String(value)
 }

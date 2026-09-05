@@ -9,6 +9,31 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+func TestSessionReservesAuthenticationTables(t *testing.T) {
+	for _, database := range []DatabaseChoice{DatabaseSQLite, DatabasePostgres} {
+		for _, auth := range []AuthChoice{AuthNone, AuthJWT, AuthSession} {
+			for _, table := range []string{"auth_users", "auth_sessions", "auth_audit_logs", "auth_rate_limits", "auth_reports"} {
+				t.Run(string(database)+"/"+string(auth)+"/"+table, func(t *testing.T) {
+					resource, err := spec.Parse([]byte("schema_version: 1\nname: AccountMirror\ntable: " + table + "\nroute: /accounts\nfields: []\n"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					opts := DefaultProjectOptions()
+					opts.Database, opts.Auth = database, auth
+					_, err = renderGenerated("example.com/app", []spec.Resource{resource}, opts)
+					if auth == AuthSession && table != "auth_reports" {
+						if err == nil || !strings.Contains(err.Error(), "reserved") {
+							t.Fatalf("reserved Session table %s accepted: %v", table, err)
+						}
+					} else if err != nil {
+						t.Fatalf("legitimate resource rejected: %v", err)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestFloatSampleSatisfiesExactBound(t *testing.T) {
 	tests := map[string]struct {
 		constraint string

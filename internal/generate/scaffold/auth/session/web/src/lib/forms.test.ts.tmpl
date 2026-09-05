@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest"
-import { buildPayload, initialValues } from "./forms"
+import { describe, expect, it, vi } from "vitest"
+import { buildPayload, initialValues, int64Schema, jsonSchema } from "./forms"
+import { parseJSON, stringifyJSON } from "./api"
 import type { FieldDefinition, ResourceRecord } from "./resource"
 
 const fields: FieldDefinition[] = [
@@ -9,6 +10,43 @@ const fields: FieldDefinition[] = [
 ]
 
 describe("form serialization", () => {
+  it("preserves signed int64 limits, explicit zero, defaults and nested JSON", () => {
+    const integers: FieldDefinition[] = [
+      { ...fields[1]!, name: "owner_id", type: "int64", hasDefault: true, defaultValue: "9007199254740993" },
+      { ...fields[2]!, hasDefault: true, defaultValue: '{"id":9007199254740993}' },
+    ]
+    const values = initialValues(integers)
+    expect(values.owner_id).toBe("9007199254740993")
+    expect(values.metadata).toBe('{"id":9007199254740993}')
+    values.metadata = '{"id":9007199254740993}'
+    const payload = buildPayload(integers, values, new Set(), new Set(["owner_id", "metadata"]), "create")
+    expect(int64Schema().parse(payload.owner_id)).toBe(9007199254740993n)
+    expect(jsonSchema.parse(payload.metadata)).toEqual({ id: 9007199254740993n })
+    expect(stringifyJSON(payload)).toBe('{"owner_id":9007199254740993,"metadata":{"id":9007199254740993}}')
+    for (const value of [-9223372036854775808n, 0n, 9223372036854775807n]) expect(int64Schema().safeParse(value).success).toBe(true)
+    for (const value of [-9223372036854775809n, 9223372036854775808n, 1.5, "bad"]) expect(int64Schema().safeParse(value).success).toBe(false)
+    expect(int64Schema("9007199254740993", "9007199254740995").safeParse(9007199254740992n).success).toBe(false)
+    expect(int64Schema("9007199254740993", "9007199254740995").safeParse(9007199254740994n).success).toBe(true)
+    values.owner_id = "0"
+    expect(buildPayload(integers, values, new Set(), new Set(["owner_id"]), "update")).toEqual({ owner_id: 0n })
+    const record = { id: 9223372036854775807n, created_at: "", updated_at: "", owner_id: -9223372036854775808n, metadata: parseJSON('{"id":9007199254740993}') }
+    expect(initialValues(integers, record)).toEqual({ owner_id: "-9223372036854775808", metadata: '{\n  "id": 9007199254740993\n}' })
+    for (const value of [undefined, () => {}, NaN]) expect(jsonSchema.safeParse({ value }).success).toBe(false)
+  })
+
+  it("displays encoded JSON defaults without requiring native precision support", () => {
+    const nativeJSON = JSON
+    vi.stubGlobal("JSON", {
+      parse: (text: string, reviver: (key: string, value: unknown) => unknown) => nativeJSON.parse(text, (key, value: unknown) => reviver(key, value)),
+      stringify: nativeJSON.stringify,
+    })
+    try {
+      const definition: FieldDefinition[] = [{ ...fields[2]!, hasDefault: true, defaultValue: '{"id":9007199254740993}' }]
+      expect(initialValues(definition).metadata).toBe('{"id":9007199254740993}')
+      expect(initialValues(definition, { id: 1, created_at: "", updated_at: "", metadata: { id: 7 } }).metadata).toBe('{\n  "id": 7\n}')
+    } finally { vi.unstubAllGlobals() }
+  })
+
   it("sends required create fields and only touched optional fields", () => {
     const values = initialValues(fields)
     values.name = "Example"

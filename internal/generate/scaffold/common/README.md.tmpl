@@ -104,6 +104,10 @@ Example test token (replace issuer, audience, and key):
 {{if .Options.HasSession}}
 ## Database session authentication
 
+Business resources must not use the reserved tables `auth_users`, `auth_sessions`, `auth_audit_logs`, or `auth_rate_limits`. The generator rejects conflicts before changing outputs, including during upgrades; it does not remove already deployed resource routes.
+
+The console preserves the API's JSON number contract for full-range `int64`, defaults, and integers nested in JSON fields. This requires native BigInt, JSON source text access, and `JSON.rawJSON`; unsupported browsers reject large-number reads/writes rather than rounding them.
+
 This project uses first-party credentials and revocable database sessions. `POST /auth/login` and `POST /auth/logout` are public (logout is idempotent); `GET /auth/me`, `POST /auth/password`, and every `/api/v1` route require a session. Session 401 responses intentionally omit `WWW-Authenticate`.
 
 The migration source of truth is the GORM models `auth_users`, `auth_sessions`, and `auth_audit_logs`{{if .Options.IsPostgres}}, plus `auth_rate_limits` for shared login limiting{{end}}. No handwritten authentication-table migration is shipped. Before the first start, run `make migration name=session_auth`, review the SQL and commit it, then run `make migrate-apply`. Runtime startup never calls `AutoMigrate`. The fixed roles are `admin` (all generated permissions) and `viewer` (generated reads only); user role assignments are editable, but role definitions and permission sets are not.

@@ -331,7 +331,7 @@ func TestApplyUpgradeRollbackAndConcurrentEdits(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer root.Close()
+			defer func() { _ = root.Close() }()
 			injected := errors.New("injected write failure")
 			err = applyUpgrade(t.Context(), root, "stage", []string{"a", "b"}, before, after, func(r *os.Root, src, dst string) error {
 				if dst == "b" {

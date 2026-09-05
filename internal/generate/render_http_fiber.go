@@ -37,7 +37,7 @@ func (h handler) list(c fiber.Ctx) error {
 	case "", "id", "created_at"{{range sortableFields .Resource}}, {{quote .Name}}{{end}}:
 	default: return httpx.WriteError(c, apperror.BadRequest("invalid_sort", "sort is not allowed"))
 	}
-	query, parseErr := url.ParseQuery(string(c.Request().URI().QueryString()))
+	{{if filterFields .Resource}}query{{else}}_{{end}}, parseErr := url.ParseQuery(string(c.Request().URI().QueryString()))
 	if parseErr != nil { return httpx.WriteError(c, apperror.BadRequest("invalid_filter", "query string is invalid")) }
 	exact := map[string]any{}
 {{range filterFields .Resource}}	if values, present := query[{{quote .Name}}]; present { if len(values) != 1 { return httpx.WriteError(c, apperror.BadRequest("invalid_filter", {{quote (printf "%s filter must be provided once" .Name)}})) }; value, parseErr := httpx.ParseScalar(values[0], {{quote (printf "%s" .Type)}}); if parseErr != nil { return httpx.WriteError(c, apperror.BadRequest("invalid_filter", {{quote (printf "invalid %s filter" .Name)}})) }; exact[{{quote .Name}}] = value }
@@ -327,10 +327,10 @@ package generated
 import (
 	"github.com/gofiber/fiber/v3"
 	"gorm.io/gorm"
-{{range .Resources}}	"{{$.Module}}/internal/resources/{{.Package}}"
+{{range .Resources}}	{{if ne (resourceImportName .) .Package}}{{resourceImportName .}} {{end}}"{{$.Module}}/internal/resources/{{.Package}}"
 {{end}})
 
 func Register(router fiber.Router, db *gorm.DB) {
-{{range .Resources}}	{{.Package}}.Register(router, db)
+{{range .Resources}}	{{resourceImportName .}}.Register(router, db)
 {{end}}}
 `

@@ -7,8 +7,8 @@ import { APIError, apiRequest, messageFor, type Page } from "@/lib/api"
 import { loadSession, useAuth } from "@/lib/auth"
 import type { ColumnDefinition } from "@/lib/resource"
 
-type User = Record<string, unknown> & { id: number; email: string; role: string; disabled_at?: string; created_at: string }
-type Session = Record<string, unknown> & { id: number; created_at: string; expires_at: string; last_seen_at: string; ip: string; user_agent: string }
+type User = Record<string, unknown> & { id: number | bigint; email: string; role: string; disabled_at?: string; created_at: string }
+type Session = Record<string, unknown> & { id: number | bigint; created_at: string; expires_at: string; last_seen_at: string; ip: string; user_agent: string }
 const { identity } = useAuth()
 const client = useQueryClient()
 const page = ref(1)
@@ -46,7 +46,7 @@ const users = useQuery({
   queryFn: () => apiRequest<Page<User>>(`/auth/users?${new URLSearchParams({ page: String(page.value), email: committedEmail.value })}`),
 })
 const sessions = useQuery({
-  queryKey: computed(() => ["admin-sessions", sessionUser.value?.id, sessionPage.value]),
+  queryKey: computed(() => ["admin-sessions", String(sessionUser.value?.id ?? ""), sessionPage.value]),
   enabled: computed(() => sessionUser.value !== undefined),
   queryFn: () => apiRequest<Page<Session>>(`/auth/users/${sessionUser.value?.id}/sessions?page=${sessionPage.value}`),
 })

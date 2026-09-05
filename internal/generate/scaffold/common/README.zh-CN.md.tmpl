@@ -96,6 +96,10 @@ openssl rand -base64 32
 {{if .Options.HasSession}}
 ## 数据库 Session 认证
 
+业务资源不得占用 `auth_users`、`auth_sessions`、`auth_audit_logs`、`auth_rate_limits` 四个保留表名。生成器会在改动产物前拒绝冲突，升级同样受此约束；不会自动移除已部署的资源路由。
+
+管理端保留 API 的 JSON 数字契约，支持完整 `int64`、默认值及 JSON 内嵌整数的精度。浏览器须支持原生 BigInt、JSON 原始文本读取和 `JSON.rawJSON`；不支持时会拒绝大整数读写，不会静默取整。
+
 本项目使用第一方账号密码和可撤销的数据库 Session。`POST /auth/login`、`POST /auth/logout` 公开（logout 幂等）；`GET /auth/me`、`POST /auth/password` 和全部 `/api/v1` 路由要求 Session。Session 的 401 响应刻意不发送 `WWW-Authenticate`。
 
 迁移的事实源是 GORM 模型：`auth_users`、`auth_sessions`、`auth_audit_logs`{{if .Options.IsPostgres}}，以及共享登录限流表 `auth_rate_limits`{{end}}。生成器不附带静态 SQL；首次启动前必须执行 `make migration name=session_auth`，审查并提交 SQL，再执行 `make migrate-apply`。运行时绝不调用 `AutoMigrate`。固定角色只有 `admin`（全部生成权限）和 `viewer`（只读权限）；可调整用户的角色归属，不能在线编辑角色定义或权限集合。

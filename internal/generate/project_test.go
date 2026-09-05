@@ -890,6 +890,87 @@ func TestGeneratedGORMHelperMatchesOfficialCLI(t *testing.T) {
 	}
 }
 
+func TestSessionReservedTableFailsBeforeWriting(t *testing.T) {
+	g := testGenerator(t)
+	root := filepath.Join(t.TempDir(), "api")
+	opts := generate.DefaultProjectOptions()
+	opts.Auth = generate.AuthSession
+	if err := g.New(t.Context(), root, "example.com/reserved-tables", opts); err != nil {
+		t.Fatal(err)
+	}
+	// YAML escapes are resolved before the shared generation boundary checks names.
+	source := filepath.Join(t.TempDir(), "mirror.yaml")
+	data := []byte("schema_version: 1\nname: AccountMirror\ntable: \"auth_\\u0075sers\"\nroute: /accounts\nfields:\n  - {name: password_hash, type: string}\n")
+	if err := os.WriteFile(source, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshot(t, root)
+	if err := g.Add(t.Context(), root, source); err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("Add accepted a reserved table: %v", err)
+	}
+	if snapshot(t, root) != before {
+		t.Fatal("rejected Add changed the project")
+	}
+	if err := os.WriteFile(filepath.Join(root, "resources", "accountmirror.yaml"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before = snapshot(t, root)
+	for name, operation := range map[string]func() error{
+		"generate": func() error { return g.Generate(t.Context(), root) },
+		"check":    func() error { return g.Check(t.Context(), root) },
+		"upgrade preview": func() error {
+			_, err := g.Upgrade(t.Context(), root, generate.UpgradeOptions{})
+			return err
+		},
+		"upgrade apply": func() error {
+			_, err := g.Upgrade(t.Context(), root, generate.UpgradeOptions{Apply: true})
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := operation(); err == nil || !strings.Contains(err.Error(), "reserved") {
+				t.Fatalf("accepted a reserved table: %v", err)
+			}
+			if snapshot(t, root) != before {
+				t.Fatal("rejected operation changed the project")
+			}
+		})
+	}
+}
+
+func TestResourceImportNamesCompile(t *testing.T) {
+	for _, http := range []generate.HTTPChoice{generate.HTTPEcho, generate.HTTPFiber} {
+		t.Run(string(http), func(t *testing.T) {
+			g := testGenerator(t)
+			root := filepath.Join(t.TempDir(), "api")
+			opts := generate.DefaultProjectOptions()
+			opts.HTTP = http
+			if http == generate.HTTPEcho {
+				opts.Auth = generate.AuthSession
+			}
+			if err := g.New(t.Context(), root, "example.com/import-names", opts); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"Echo", "Fiber", "Gorm", "Fmt", "Os", "Gormschema", "Platformauth", "Group", "Router", "Db", "Any", "Nil", "Init", "Resourceecho"} {
+				packageName := strings.ToLower(name)
+				data := "schema_version: 1\nname: " + name + "\ntable: " + packageName + "\nroute: /" + packageName + "\nfields: []\n"
+				if err := os.WriteFile(filepath.Join(root, "resources", packageName+".yaml"), []byte(data), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := g.Generate(t.Context(), root); err != nil {
+				t.Fatal(err)
+			}
+			run(t, root, "go", "mod", "tidy")
+			if err := g.Check(t.Context(), root); err != nil {
+				t.Fatal(err)
+			}
+			run(t, root, "go", "test", "./...")
+			run(t, root, "go", "run", "./tools/gormschema")
+		})
+	}
+}
+
 func run(t *testing.T, dir, name string, args ...string) {
 	t.Helper()
 	command := exec.Command(name, args...)

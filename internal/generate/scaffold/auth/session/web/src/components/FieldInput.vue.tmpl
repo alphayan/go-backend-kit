@@ -11,7 +11,7 @@ const emit = defineEmits<{
 }>()
 
 const inputType = computed(() => {
-  if (["int32", "int64", "float64", "decimal"].includes(props.field.type)) return "number"
+  if (["int32", "float64", "decimal"].includes(props.field.type)) return "number"
   if (props.field.type === "time") return "datetime-local"
   return "text"
 })

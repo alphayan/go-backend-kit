@@ -17,7 +17,8 @@ fields:
   - {name: status, type: string, enum: [active, archived], filterable: true}
   - {name: quantity, type: int32, min: 0, max: 1000, sortable: true}
   - {name: price, type: decimal, min: 0}
-  - {name: metadata, type: json, nullable: true}
+  - {name: metadata, type: json, nullable: true, default: {id: 9007199254740993}}
+  - {name: owner_id, type: int64, min: 9007199254740992.1, max: 9007199254740995.9, default: 9007199254740993}
 `)
 	files, err := renderGenerated("example.com/app", []spec.Resource{resource}, ProjectOptions{
 		HTTP: HTTPEcho, Database: DatabaseSQLite, Cache: CacheNone, Messaging: MessagingNone,
@@ -36,6 +37,9 @@ fields:
 		`quantity: numberSchema(true, "0", "1000").optional()`,
 		`price: decimalSchema("0", undefined).optional()`,
 		`metadata: jsonSchema.nullable().optional()`,
+		`owner_id: int64Schema("9007199254740993", "9007199254740995").optional()`,
+		`"defaultValue":"9007199254740993"`,
+		`"defaultValue":"{\"id\":9007199254740993}"`,
 		`"searchable":true`,
 		`"filterable":true`,
 		`"sortable":true`,

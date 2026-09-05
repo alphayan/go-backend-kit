@@ -144,6 +144,8 @@ Supported scalar types are `string`, `text`, `bool`, `int32`, `int64`, `float64`
 
 `decimal` values use JSON strings to preserve precision.
 
+`int64` values retain their JSON number representation. The Session console preserves large integers with native BigInt and JSON source/raw-number support, including defaults and nested JSON fields; older browsers without these capabilities reject large-number reads/writes instead of rounding them.
+
 Supported field options are `required`, `nullable`, `default`, `unique`, `index`, `enum`, `min`, `max`, `max_length`, `searchable`, `filterable`, and `sortable`. Unknown keys, unsafe names or routes, duplicate base fields, type-invalid defaults, and contradictory constraints fail before any generated file is replaced.
 
 Relations are intentionally not generated in v0.1.0. Use scalar fields such as `user_id` and add domain behavior in ordinary handwritten `.go` files, which the generator never overwrites.
@@ -190,6 +192,8 @@ Apply uses the project lock, change detection and per-file replacement, rolling 
 After upgrading, run `go mod tidy`, `go tool gobackend generate`, `go tool gobackend check`, `go test -race ./...`, `go vet ./...` and `go tool govulncheck ./...`. Session projects additionally require frozen pnpm installation, frontend build/browser tests. Review database migrations and verify recovery separately before production cutover.
 
 ## Session authentication option
+
+Session projects reserve `auth_users`, `auth_sessions`, `auth_audit_logs`, and `auth_rate_limits` for built-in models. Business resources cannot use these table names. Generation, checking, and upgrades reject existing conflicts without rewriting the project; already deployed interfaces require a separate reviewed upgrade.
 
 `--auth session` is an Echo-only, database-backed login kit with revocable HttpOnly cookies, Argon2id passwords, fixed `admin`/`viewer` RBAC, global standard-library cross-origin protection, bounded login/KDF limits, and best-effort audit logs. It adds `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`, and `POST /auth/password`, plus generated route-permission tables and an embedded Vue admin console for resources.
 

@@ -57,6 +57,16 @@ test("admin users, audit, viewer restrictions, password rotation and expiry", as
     await expect(page.getByRole("cell", { name: "user_create", exact: true })).toBeVisible()
     await expect(page.getByRole("cell", { name: "auth_users", exact: true })).toBeVisible()
 
+    for (const actorID of ["7", "9007199254740993"]) {
+      await page.getByLabel("Actor ID", { exact: true }).fill(actorID)
+      const response = page.waitForResponse((value) => {
+        const url = new URL(value.url())
+        return url.pathname === "/auth/audit-logs" && url.searchParams.get("actor_id") === actorID
+      })
+      await page.getByRole("button", { name: "Apply filters" }).click()
+      expect((await response).status()).toBe(200)
+    }
+
     await page.getByRole("link", { name: /browser-admin@example.test/ }).click()
     await page.getByLabel("Current password", { exact: true }).fill("browser test initial password")
     await page.getByLabel("New password", { exact: true }).fill("browser test replacement password")

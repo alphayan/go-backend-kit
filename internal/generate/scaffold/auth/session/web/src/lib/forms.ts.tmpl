@@ -1,4 +1,5 @@
 import { z } from "zod"
+import { parseJSON, stringifyJSON } from "./api"
 import type { FieldDefinition, ResourceRecord } from "./resource"
 
 export type FormValue = string | boolean
@@ -12,6 +13,13 @@ export function numberSchema(integer: boolean, min?: string, max?: string) {
   return schema
 }
 
+export function int64Schema(min?: string, max?: string) {
+  let schema = z.bigint().min(-9223372036854775808n).max(9223372036854775807n)
+  if (min !== undefined) schema = schema.min(BigInt(min))
+  if (max !== undefined) schema = schema.max(BigInt(max))
+  return schema
+}
+
 export function decimalSchema(min?: string, max?: string) {
   return z.string().regex(/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/, "Enter a valid decimal").superRefine((value, context) => {
     const number = Number(value)
@@ -21,13 +29,17 @@ export function decimalSchema(min?: string, max?: string) {
 }
 
 export const dateTimeSchema = z.string().datetime({ offset: true })
-export const jsonSchema = z.json()
+export const jsonSchema: z.ZodType = z.lazy(() => z.union([
+  z.string(), z.number(), z.bigint(), z.boolean(), z.null(),
+  z.array(jsonSchema), z.record(z.string(), jsonSchema),
+]))
 
 export function initialValues(fields: FieldDefinition[], record?: ResourceRecord): FormValues {
   return Object.fromEntries(fields.map((field) => {
     const source = record?.[field.name] ?? field.defaultValue
     if (field.type === "bool") return [field.name, Boolean(source)]
-    if (field.type === "json" && source !== undefined && source !== null) return [field.name, JSON.stringify(source, null, 2)]
+    if (field.type === "json" && record?.[field.name] == null && field.hasDefault) return [field.name, String(field.defaultValue)]
+    if (field.type === "json" && source !== undefined && source !== null) return [field.name, stringifyJSON(source, 2)]
     if (field.type === "time" && source !== undefined && source !== null) return [field.name, toLocalDateTime(String(source))]
     return [field.name, source === undefined || source === null ? "" : String(source)]
   }))
@@ -51,13 +63,15 @@ export function buildPayload(fields: FieldDefinition[], values: FormValues, null
     const raw = String(value)
     if (raw === "" && field.type !== "string" && field.type !== "text" && field.type !== "decimal") continue
     switch (field.type) {
-    case "int32":
     case "int64":
+      payload[field.name] = /^[+-]?\d+$/.test(raw) ? BigInt(raw) : raw
+      break
+    case "int32":
     case "float64":
       payload[field.name] = Number(raw)
       break
     case "json":
-      payload[field.name] = JSON.parse(raw) as unknown
+      payload[field.name] = parseJSON(raw)
       break
     case "time":
       payload[field.name] = new Date(raw).toISOString()

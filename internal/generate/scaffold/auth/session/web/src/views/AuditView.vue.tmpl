@@ -5,10 +5,10 @@ import DataTable from "@/components/DataTable.vue"
 import { APIError, apiRequest, messageFor, type Page } from "@/lib/api"
 import type { ColumnDefinition } from "@/lib/resource"
 
-type AuditRow = Record<string, unknown> & { id: number }
+type AuditRow = Record<string, unknown> & { id: number | bigint }
 const page = ref(1)
 const fields = [
-  { key: "actor_id", label: "Actor ID", type: "number" },
+  { key: "actor_id", label: "Actor ID", type: "text" },
   { key: "action", label: "Action", type: "text" },
   { key: "resource", label: "Resource", type: "text" },
   { key: "outcome", label: "Outcome", type: "text" },

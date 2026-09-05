@@ -6,7 +6,7 @@ import ConfirmDialog from "@/components/ConfirmDialog.vue"
 import DataTable from "@/components/DataTable.vue"
 import FormShell from "@/components/FormShell.vue"
 import { resources } from "@/generated/registry_gen"
-import { APIError, apiRequest, messageFor, type Page } from "@/lib/api"
+import { APIError, apiRequest, messageFor, stringifyJSON, type Page } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
 import type { ResourceRecord } from "@/lib/resource"
 
@@ -65,7 +65,7 @@ const save = useMutation({
     const updating = formMode.value === "update" && selected.value !== undefined
     return apiRequest<ResourceRecord>(updating ? `${current.apiPath}/${selected.value?.id}` : current.apiPath, {
       method: updating ? "PATCH" : "POST",
-      body: JSON.stringify(payload),
+      body: stringifyJSON(payload),
     })
   },
   onSuccess: async () => {

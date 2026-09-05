@@ -11,7 +11,8 @@ import (
 	"github.com/alphayan/go-backend-kit/internal/spec"
 )
 
-const legacyGeneratedOutputSHA256 = "0491e5ce3078935536fd6947d5c63afea3c3522e30f76a6627ad7f7bf4a2bd63"
+// Includes the unused-query correction for Fiber resources without filters.
+const legacyGeneratedOutputSHA256 = "7ffb40b870109fd6b7988b16315d8db6268148ade6d6680b5698aa2e3efeb136"
 
 func TestLegacyGeneratedOutputRemainsByteIdentical(t *testing.T) {
 	resources := []spec.Resource{

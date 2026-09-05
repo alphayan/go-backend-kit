@@ -129,6 +129,8 @@ DELETE /api/v1/products/:id
 
 `decimal` 使用 JSON 字符串传输，避免精度损失。
 
+`int64` 保持 JSON 数字格式。Session 管理端使用原生 BigInt 和 JSON 原始数字读写能力，保留大整数、默认值和嵌套 JSON 字段的精度；不支持这些能力的旧浏览器会拒绝大整数读写，不会静默取整。
+
 字段属性支持 `required`、`nullable`、`default`、`unique`、`index`、`enum`、`min`、`max`、`max_length`、`searchable`、`filterable`、`sortable`。未知键、危险名称或路由、重复基础字段、默认值类型错误、互相矛盾的约束都会在替换任何生成文件前报错。
 
 首版不生成关联。`user_id` 等业务 ID 作为普通标量字段声明；领域扩展直接写在普通手写 `.go` 文件中，生成器永不覆盖。
@@ -160,6 +162,8 @@ PostgreSQL 连接池默认最多 25 个连接、25 个空闲连接，连接最�
 升级后执行 `go mod tidy`、`go tool gobackend generate`、`go tool gobackend check`、`go test -race ./...`、`go vet ./...` 和 `go tool govulncheck ./...`；Session 项目还需冻结 pnpm 安装、前端构建/浏览器测试。数据库变更仍需单独审查迁移并验证恢复，不能用代码升级代替生产切换。
 
 ## Session 认证选项
+
+Session 项目保留 `auth_users`、`auth_sessions`、`auth_audit_logs`、`auth_rate_limits` 四个内置表名，业务资源不得占用。已有冲突时，生成、检查和升级会拒绝并保留原项目；已部署接口需单独审查升级。
 
 `--auth session` 是仅限 Echo 的数据库登录套件，包含可撤销 HttpOnly Cookie、Argon2id 密码、固定 `admin`/`viewer` RBAC、全局标准库跨源保护、有界登录/KDF 限流和尽力写入的审计日志。它新增 `POST /auth/login`、`POST /auth/logout`、`GET /auth/me`、`POST /auth/password`，并为资源生成路由权限表和内嵌 Vue 管理端。
 

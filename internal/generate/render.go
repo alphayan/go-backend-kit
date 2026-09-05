@@ -31,6 +31,14 @@ func renderGenerated(modulePath string, resources []spec.Resource, opts ProjectO
 	if err := opts.Validate(); err != nil {
 		return nil, err
 	}
+	if opts.HasSession() {
+		for _, resource := range resources {
+			switch resource.Table {
+			case "auth_users", "auth_sessions", "auth_audit_logs", "auth_rate_limits":
+				return nil, fmt.Errorf("resource %q uses table %q reserved for session authentication", resource.Name, resource.Table)
+			}
+		}
+	}
 	files := make(map[string][]byte)
 	resourceTemplates := []struct {
 		name string
@@ -96,12 +104,13 @@ func renderGenerated(modulePath string, resources []spec.Resource, opts ProjectO
 func executeGoTemplate(name, body string, data any) ([]byte, error) {
 	opts := optionsFrom(data)
 	functions := template.FuncMap{
-		"baseType":      baseGoType,
-		"modelType":     modelGoType,
-		"modelImports":  modelImports,
-		"dtoImports":    dtoImports,
-		"hasDTOImports": func(r spec.Resource) bool { return dtoImports(r) != "" },
-		"gormTag":       func(field spec.Field) string { return gormTag(opts, field) },
+		"resourceImportName": resourceImportName,
+		"baseType":           baseGoType,
+		"modelType":          modelGoType,
+		"modelImports":       modelImports,
+		"dtoImports":         dtoImports,
+		"hasDTOImports":      func(r spec.Resource) bool { return dtoImports(r) != "" },
+		"gormTag":            func(field spec.Field) string { return gormTag(opts, field) },
 		"fieldStructTag": func(field spec.Field) string {
 			return strconv.Quote(fmt.Sprintf(`json:"%s" gorm:"%s"`, field.Name, gormTag(opts, field)))
 		},
@@ -147,6 +156,17 @@ func executeGoTemplate(name, body string, data any) ([]byte, error) {
 		return nil, fmt.Errorf("go/format: %w\n%s", err, output.String())
 	}
 	return formatted, nil
+}
+
+// Avoid template identifiers and Go's reserved import name.
+// The underscore makes aliases disjoint from every valid resource package name.
+func resourceImportName(resource spec.Resource) string {
+	switch resource.Package {
+	case "echo", "fiber", "gorm", "fmt", "os", "gormschema", "platformauth", "group", "router", "db", "any", "nil", "init":
+		return "resource_" + resource.Package
+	default:
+		return resource.Package
+	}
 }
 
 func optionsFrom(data any) ProjectOptions {
@@ -1166,11 +1186,11 @@ package generated
 import (
 	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
-{{range .Resources}}	"{{$.Module}}/internal/resources/{{.Package}}"
+{{range .Resources}}	{{if ne (resourceImportName .) .Package}}{{resourceImportName .}} {{end}}"{{$.Module}}/internal/resources/{{.Package}}"
 {{end}})
 
 func Register(group *echo.Group, db *gorm.DB) {
-{{range .Resources}}	{{.Package}}.Register(group, db)
+{{range .Resources}}	{{resourceImportName .}}.Register(group, db)
 {{end}}}
 `
 
@@ -1212,11 +1232,11 @@ import (
 	"ariga.io/atlas-provider-gorm/gormschema"
 {{if .Options.HasSession}}	platformauth "{{.Module}}/internal/platform/auth"
 {{end}}
-{{range .Resources}}	"{{$.Module}}/internal/resources/{{.Package}}"
+{{range .Resources}}	{{if ne (resourceImportName .) .Package}}{{resourceImportName .}} {{end}}"{{$.Module}}/internal/resources/{{.Package}}"
 {{end}})
 
 func main() {
-	models := []any{ {{range .Resources}}&{{.Package}}.{{.Name}}{},{{end}}{{if .Options.HasSession}}&platformauth.User{}, &platformauth.Session{}, &platformauth.AuditLog{},{{if .Options.IsPostgres}}&platformauth.RateLimit{},{{end}}{{end}} }
+	models := []any{ {{range .Resources}}&{{resourceImportName .}}.{{.Name}}{},{{end}}{{if .Options.HasSession}}&platformauth.User{}, &platformauth.Session{}, &platformauth.AuditLog{},{{if .Options.IsPostgres}}&platformauth.RateLimit{},{{end}}{{end}} }
 	statements, err := gormschema.New("{{if .Options.IsPostgres}}postgres{{else}}sqlite{{end}}").Load(models...)
 	if err != nil { fmt.Fprintln(os.Stderr, err); os.Exit(1) }
 	fmt.Print(statements)

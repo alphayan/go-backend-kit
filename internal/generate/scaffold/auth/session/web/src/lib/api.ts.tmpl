@@ -33,7 +33,7 @@ export interface Page<T> {
   items: T[]
   page: number
   page_size: number
-  total: number
+  total: number | bigint
   total_pages: number
 }
 
@@ -53,7 +53,7 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
     return undefined as T
   }
 
-  const body = await parseJSON(response)
+  const body = await parseResponseJSON(response)
   if (!response.ok) {
     const fallback: APIErrorPayload = {
       code: "request_failed",
@@ -71,14 +71,39 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
   return body.data
 }
 
-async function parseJSON(response: Response): Promise<unknown> {
+// Keep the API's JSON number contract while preserving integers beyond 2^53.
+export function parseJSON(text: string): unknown {
+  return JSON.parse(text, (_key, value: unknown, context?: { source: string }) => {
+    if (typeof value === "number" && !Number.isSafeInteger(value) && (Number.isInteger(value) || !Number.isFinite(value))) {
+      if (context === undefined) throw new Error("Update your browser to read large integers without losing precision.")
+      if (/^-?\d+$/.test(context.source)) return BigInt(context.source)
+    }
+    return value
+  }) as unknown
+}
+
+export function stringifyJSON(value: unknown, space?: number): string {
+  const rawJSON = (JSON as JSON & { rawJSON?: (text: string) => unknown }).rawJSON
+  const result = JSON.stringify(value, (_key, item: unknown) => {
+    if (typeof item !== "bigint") return item
+    const number = Number(item)
+    if (Number.isSafeInteger(number)) return number
+    if (rawJSON === undefined) throw new Error("Update your browser to save large integers without losing precision.")
+    return rawJSON(item.toString())
+  }, space)
+  if (result === undefined) throw new Error("Value cannot be encoded as JSON.")
+  return result
+}
+
+async function parseResponseJSON(response: Response): Promise<unknown> {
   const text = await response.text()
   if (text === "") {
     return null
   }
   try {
-    return JSON.parse(text) as unknown
-  } catch {
+    return parseJSON(text)
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error
     throw new APIError(response.status, {
       code: "invalid_response",
       message: "The server returned invalid JSON.",

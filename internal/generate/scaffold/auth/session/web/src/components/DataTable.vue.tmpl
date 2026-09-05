@@ -1,4 +1,4 @@
-<script setup lang="ts" generic="T extends Record<string, unknown> & { id: number }">
+<script setup lang="ts" generic="T extends Record<string, unknown> & { id: number | bigint }">
 import type { ColumnDefinition } from "@/lib/resource"
 import { formatCell } from "@/lib/resource"
 
@@ -8,7 +8,7 @@ const props = defineProps<{
   loading: boolean
   page: number
   totalPages: number
-  total: number
+  total: number | bigint
   sort: string
   canWrite: boolean
 }>()
@@ -55,7 +55,7 @@ function sortLabel(column: ColumnDefinition): "none" | "ascending" | "descending
           <tr v-else-if="rows.length === 0">
             <td :colspan="columns.length + (canWrite ? 1 : 0)"><div class="table-message">No records match this view.</div></td>
           </tr>
-          <tr v-for="record in rows" v-else :key="record.id">
+          <tr v-for="record in rows" v-else :key="String(record.id)">
             <td v-for="column in columns" :key="column.key" :data-label="column.label">
               <span :class="{ 'boolean-pill': column.kind === 'bool' }" v-text="formatCell(record[column.key], column.kind)" />
             </td>

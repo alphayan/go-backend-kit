@@ -70,7 +70,7 @@ func captureScaffoldBaseline(root, module string, opts ProjectOptions) (scaffold
 	if err != nil {
 		return scaffoldBaseline{}, err
 	}
-	defer dir.Close()
+	defer func() { _ = dir.Close() }()
 	baseline := scaffoldBaseline{GeneratedBy: "gobackend", Version: 1, Module: module, Selection: opts.normalized(), Files: map[string]string{}}
 	for name := range names {
 		file, err := readUpgradeFile(dir, name)
@@ -101,14 +101,12 @@ func writeScaffoldBaseline(root string, baseline scaffoldBaseline) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(file.Name())
+	defer func() { _ = os.Remove(file.Name()) }()
 	if _, err := file.Write(data); err != nil {
-		file.Close()
-		return err
+		return errors.Join(err, file.Close())
 	}
 	if err := file.Chmod(0o644); err != nil {
-		file.Close()
-		return err
+		return errors.Join(err, file.Close())
 	}
 	if err := file.Close(); err != nil {
 		return err
@@ -117,7 +115,7 @@ func writeScaffoldBaseline(root string, baseline scaffoldBaseline) error {
 	if err != nil {
 		return err
 	}
-	defer dir.Close()
+	defer func() { _ = dir.Close() }()
 	return replaceFile(dir, filepath.Base(file.Name()), scaffoldBaselineName)
 }
 
@@ -128,7 +126,7 @@ func trackedModuleBaseline(root string) (scaffoldBaseline, []string, error) {
 	if err != nil {
 		return scaffoldBaseline{}, nil, err
 	}
-	defer dir.Close()
+	defer func() { _ = dir.Close() }()
 	file, err := readUpgradeFile(dir, scaffoldBaselineName)
 	if err != nil || !file.exists {
 		return scaffoldBaseline{}, nil, err
@@ -252,7 +250,7 @@ func (g Generator) Upgrade(ctx context.Context, root string, options UpgradeOpti
 	if err != nil {
 		return report, err
 	}
-	defer dir.Close()
+	defer func() { _ = dir.Close() }()
 	// Validate these paths before existing metadata helpers read them.
 	for _, name := range []string{"go.mod", projectMetadataName, generatedManifestName, scaffoldBaselineName} {
 		if _, err := readUpgradeFile(dir, name); err != nil {
@@ -307,11 +305,12 @@ func (g Generator) Upgrade(ctx context.Context, root string, options UpgradeOpti
 		}
 		for _, name := range []string{"go.mod", projectMetadataName, generatedManifestName} {
 			if _, err := readUpgradeFile(baselineDir, name); err != nil {
-				baselineDir.Close()
-				return report, err
+				return report, errors.Join(err, baselineDir.Close())
 			}
 		}
-		baselineDir.Close()
+		if err := baselineDir.Close(); err != nil {
+			return report, err
+		}
 		oldModule, moduleErr := readModule(baselineRoot)
 		oldOpts, optsErr := loadProjectOptions(baselineRoot)
 		if moduleErr != nil || optsErr != nil || oldModule != module || oldOpts.normalized() != opts.normalized() {
@@ -414,7 +413,7 @@ func (g Generator) Upgrade(ctx context.Context, root string, options UpgradeOpti
 	if err != nil {
 		return report, err
 	}
-	defer candidateDir.Close()
+	defer func() { _ = candidateDir.Close() }()
 	newBaselineFile, err := readUpgradeFile(candidateDir, scaffoldBaselineName)
 	if err != nil {
 		return report, err
